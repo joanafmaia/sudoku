@@ -1300,6 +1300,9 @@ async def handle_challenge_completion(
     view: "SudokuView",
 ) -> None:
     """Record finish time; settle when every remaining player is done or has forfeited."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
     finished_at = time.time()
     match_id = game["match_id"]
     slot = game["player_slot"]
@@ -1315,7 +1318,8 @@ async def handle_challenge_completion(
         },
     )
     if not match:
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
+            content=None,
             embed=paper_embed("Match missing"),
             view=None,
             attachments=[],
@@ -1341,7 +1345,7 @@ async def handle_challenge_completion(
     )
     caption = f"**Board complete** · Time: **{format_time(elapsed)}**. {wait_msg}"
     file = board_to_file(image)
-    await interaction.response.edit_message(
+    await interaction.edit_original_response(
         content=caption,
         embed=None,
         view=None,
@@ -1997,7 +2001,7 @@ class SudokuView(discord.ui.View):
                 label=self._pad_label(label),
                 style=discord.ButtonStyle.secondary,
                 row=i // 3,
-                custom_id=self._cid(f"pad:{i}"),
+                custom_id=self._cid(f"box:{i}"),
             )
             btn.callback = self._box_cb(i)
             self.add_item(btn)
@@ -2034,7 +2038,7 @@ class SudokuView(discord.ui.View):
                 style=style,
                 row=i // 3,
                 disabled=disabled,
-                custom_id=self._cid(f"pad:{i}"),
+                custom_id=self._cid(f"cell:{box_id}:{i}"),
             )
             btn.callback = self._cell_cb(i)
             self.add_item(btn)
@@ -2046,7 +2050,7 @@ class SudokuView(discord.ui.View):
                 label=self._pad_label(str(d)),
                 style=discord.ButtonStyle.secondary,
                 row=(d - 1) // 3,
-                custom_id=self._cid(f"pad:{d - 1}"),
+                custom_id=self._cid(f"num:{d}"),
             )
             btn.callback = self._digit_cb(d)
             self.add_item(btn)
@@ -2102,30 +2106,56 @@ class SudokuView(discord.ui.View):
         ended: bool = False,
         embed: discord.Embed | None = None,
     ) -> None:
-        game = games.get(self.game_key)
-        if ended or not game:
-            final = embed or paper_embed("Game over")
-            self.stop()
-            await interaction.response.edit_message(
-                content=None,
-                embed=final,
-                view=None,
-                attachments=[],
+        # Defer immediately — Render can exceed Discord's 3s limit while rendering PNG / Mongo.
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except discord.HTTPException:
+            pass
+
+        try:
+            game = games.get(self.game_key)
+            if ended or not game:
+                final = embed or paper_embed("Game over")
+                self.stop()
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=final,
+                    view=None,
+                    attachments=[],
+                )
+                return
+
+            self.rebuild(game)
+            content, file = board_file_for(game, status=status)
+            await interaction.edit_original_response(
+                content=content,
+                embed=None,
+                attachments=[file],
+                view=self,
             )
-            return
+            await persist_game(self.game_key, game)
+        except Exception:
+            import traceback
 
-        stage = game.get("ui_stage", STAGE_BOX)
-        # Always rebuild — fixed pad/nav geometry must remount when stage changes
-        self.rebuild(game)
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.send_message(
+                        "Something went wrong updating the board. Try again.",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException:
+                    pass
+            else:
+                try:
+                    await interaction.followup.send(
+                        "Something went wrong updating the board. Try again.",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException:
+                    pass
 
-        content, file = board_file_for(game, status=status)
-        await interaction.response.edit_message(
-            content=content,
-            embed=None,
-            attachments=[file],
-            view=self,
-        )
-        await persist_game(self.game_key, game)
 
     async def on_pick_box(self, interaction: discord.Interaction, box_id: int) -> None:
         game = games[self.game_key]
@@ -2170,7 +2200,13 @@ class SudokuView(discord.ui.View):
         await self.refresh(interaction, status=f"Pencil mode **{state}**.")
 
     async def on_digit(self, interaction: discord.Interaction, digit: int) -> None:
-        game = games[self.game_key]
+        game = games.get(self.game_key)
+        if not game:
+            try:
+                await interaction.response.send_message("This game has ended.", ephemeral=True)
+            except discord.HTTPException:
+                pass
+            return
 
         r, c = selected_cell(game)
         label = cell_label(r, c)
@@ -2185,11 +2221,11 @@ class SudokuView(discord.ui.View):
             set_cell_value(game["board"], r, c, 0)
             notes = toggle_pencil(game["board"], r, c, digit)
             game["ui_stage"] = STAGE_NUMBER
-            await sync_challenge_board(game)
             await self.refresh(
                 interaction,
                 status=f"Pencil on **{label}**: {notes or 'cleared'}.",
             )
+            await sync_challenge_board(game)
             return
 
         # Pen mode: place/erase then return to cell picker (Stage 2)
@@ -2198,14 +2234,16 @@ class SudokuView(discord.ui.View):
             set_cell_value(game["board"], r, c, 0)
             game["board"][r][c]["pencil_marks"] = []
             game["ui_stage"] = STAGE_CELL
-            await sync_challenge_board(game)
             await self.refresh(interaction, status=None)
+            await sync_challenge_board(game)
             return
 
         set_cell_value(game["board"], r, c, digit)
-        await sync_challenge_board(game)
 
         if is_complete(game["board"], game["solution"]) and not find_conflicts(game["board"]):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            await sync_challenge_board(game)
             if game.get("mode") == "challenge":
                 await handle_challenge_completion(self.bot, interaction, game, self)
                 return
@@ -2228,7 +2266,7 @@ class SudokuView(discord.ui.View):
             file = board_to_file(image)
             await remove_game(key)
             self.stop()
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="**Puzzle solved!**",
                 embed=None,
                 view=None,
@@ -2239,6 +2277,7 @@ class SudokuView(discord.ui.View):
 
         game["ui_stage"] = STAGE_CELL
         await self.refresh(interaction, status=None)
+        await sync_challenge_board(game)
 
     async def on_hint(self, interaction: discord.Interaction) -> None:
         game = games.get(self.game_key)
