@@ -45,7 +45,6 @@ DIFFICULTY_CHOICES = [
 BASE_WIN_REWARD = 80
 DAILY_BONUS = 75
 STREAK_BONUS_PER = 10
-HINT_PENALTY = 10  # coins lost per hint on win (min reward floor)
 CHALLENGE_WIN_MULT = 2.0  # extra multiplier for speedrun winners
 MAX_CHALLENGE_PLAYERS = 5  # challenger + up to 4 opponents
 CHALLENGE_LOSER_COINS = 25
@@ -103,14 +102,6 @@ SHOP_TITLES = {
     "row_master": {"label": "Row Master", "cost": 300},
     "sudoku_pro": {"label": "Sudoku Pro", "cost": 500},
     "legend": {"label": "Legend", "cost": 1000},
-}
-
-SHOP_CONSUMABLES = {
-    "hint": {
-        "label": "Hint",
-        "cost": 40,
-        "desc": "Fill one empty cell with the correct digit",
-    },
 }
 
 intents = discord.Intents.default()
@@ -465,10 +456,6 @@ def is_complete(board: list[list[dict]], solution: list[list[int]]) -> bool:
     return values_grid(board) == solution
 
 
-def empty_cells(board: list[list[dict]]) -> list[tuple[int, int]]:
-    return [(r, c) for r in range(9) for c in range(9) if cell_value(board, r, c) == 0]
-
-
 def filled_count(board: list[list[dict]]) -> int:
     return sum(1 for r in range(9) for c in range(9) if cell_value(board, r, c) != 0)
 
@@ -486,7 +473,6 @@ def win_reward(
     streak: int,
     *,
     daily: bool,
-    hints_used: int,
     difficulty: str | None = None,
     challenge_winner: bool = False,
 ) -> int:
@@ -496,7 +482,6 @@ def win_reward(
     coins = int(round(coins * difficulty_multiplier(difficulty)))
     if challenge_winner:
         coins = int(round(coins * CHALLENGE_WIN_MULT))
-    coins -= hints_used * HINT_PENALTY
     return max(20, coins)
 
 
@@ -865,16 +850,10 @@ def daily_puzzle_number(day: str | None = None) -> int:
     return (d - DAILY_EPOCH).days + 1
 
 
-def daily_share_emoji_grid(*, hints_used: int = 0) -> str:
-    """3×3 Wordle-like preview for a cleared daily (greener with fewer hints)."""
-    if hints_used <= 0:
-        row = "🟩🟩🟩"
-        return "\n".join([row, row, row])
-    if hints_used == 1:
-        return "🟩🟩🟩\n🟩🟨🟩\n🟩🟩🟩"
-    if hints_used == 2:
-        return "🟩🟨🟩\n🟨🟩🟨\n🟩🟨🟩"
-    return "🟨🟨🟨\n🟨🟩🟨\n🟨🟨🟨"
+def daily_share_emoji_grid() -> str:
+    """3×3 Wordle-like preview for a cleared daily."""
+    row = "🟩🟩🟩"
+    return "\n".join([row, row, row])
 
 
 def build_daily_share_text(
@@ -882,11 +861,10 @@ def build_daily_share_text(
     day: str,
     difficulty: str | None,
     elapsed: float,
-    hints_used: int = 0,
 ) -> str:
     number = daily_puzzle_number(day)
     tier = difficulty_label(difficulty)
-    grid = daily_share_emoji_grid(hints_used=hints_used)
+    grid = daily_share_emoji_grid()
     return (
         f"Daily Sudoku #{number}\n"
         f"{tier} · {format_time(elapsed)}\n"
@@ -900,7 +878,6 @@ def build_daily_achievement_embed(
     day: str,
     difficulty: str | None,
     elapsed: float,
-    hints_used: int,
     coins: int,
     rank: int | None,
     multiplier: float,
@@ -916,7 +893,6 @@ def build_daily_achievement_embed(
     embed.add_field(name="Rank", value=str(medal), inline=True)
     embed.add_field(name="Reward", value=f"+{coins}", inline=True)
     embed.add_field(name="Multiplier", value=f"×{multiplier:.2f}", inline=True)
-    embed.add_field(name="Hints", value=str(hints_used), inline=True)
     embed.add_field(name="Share", value=f"```\n{share_text}\n```", inline=False)
     return embed
 
@@ -968,7 +944,6 @@ def finish_win(
     coins = win_reward(
         stats["streak"],
         daily=is_daily,
-        hints_used=game.get("hints_used", 0),
         difficulty=game.get("difficulty"),
         challenge_winner=challenge_winner,
     )
@@ -980,7 +955,6 @@ def finish_win(
         daily["results"][str(user.id)] = {
             "won": True,
             "time": int(elapsed),
-            "hints": game.get("hints_used", 0),
             "name": stats["name"],
         }
 
@@ -993,7 +967,7 @@ def finish_win(
             for uid, r in (get_guild_daily(data, guild_id).get("results") or {}).items()
             if r.get("won")
         ]
-        winners.sort(key=lambda item: (item[1].get("time", 10**9), item[1].get("hints", 99)))
+        winners.sort(key=lambda item: item[1].get("time", 10**9))
         for i, (uid, _) in enumerate(winners, start=1):
             if uid == str(user.id):
                 rank = i
@@ -1014,8 +988,6 @@ def finish_win(
     embed.add_field(name="Balance", value=str(stats["coins"]), inline=True)
     if rank is not None:
         embed.add_field(name="Rank", value=f"#{rank}", inline=True)
-    elif game.get("hints_used"):
-        embed.add_field(name="Hints", value=str(game["hints_used"]), inline=True)
     else:
         embed.add_field(name="Mode", value=game["mode"].capitalize(), inline=True)
     embed._sudoku_coins = coins  # type: ignore[attr-defined]
@@ -1035,14 +1007,12 @@ async def finish_win_and_announce(
 
     day = game.get("daily_date") or utc_today()
     elapsed = int(time.time() - game["started_at"])
-    hints = int(game.get("hints_used", 0) or 0)
     tier = difficulty_label(game.get("difficulty"))
     gstats = guild_stats(bot.data, guild_id)
     stats = user_stats(gstats, user.id)
     preview_coins = win_reward(
         stats["streak"] + 1,
         daily=True,
-        hints_used=hints,
         difficulty=game.get("difficulty"),
     )
 
@@ -1051,7 +1021,7 @@ async def finish_win_and_announce(
         user_id=user.id,
         day=day,
         elapsed=elapsed,
-        hints=hints,
+        hints=0,
         difficulty=tier,
         coins=preview_coins,
     )
@@ -1066,7 +1036,6 @@ async def finish_win_and_announce(
         day=day,
         difficulty=game.get("difficulty"),
         elapsed=elapsed,
-        hints_used=hints,
     )
     embed.add_field(name="Share", value=f"```\n{share}\n```", inline=False)
 
@@ -1075,7 +1044,6 @@ async def finish_win_and_announce(
         day=day,
         difficulty=game.get("difficulty"),
         elapsed=elapsed,
-        hints_used=hints,
         coins=int(coins),
         rank=rank,
         multiplier=difficulty_multiplier(game.get("difficulty")),
@@ -1957,22 +1925,10 @@ class SudokuView(discord.ui.View):
                 child.style = discord.ButtonStyle.success if pencil_on else discord.ButtonStyle.secondary  # type: ignore[attr-defined]
                 break
 
-    def _add_spacer(self, row: int, suffix: str) -> None:
-        """Disabled pad filler so every stage keeps the same 3+3 button geometry."""
-        btn = discord.ui.Button(
-            label="·",
-            style=discord.ButtonStyle.secondary,
-            row=row,
-            disabled=True,
-            custom_id=self._cid(suffix),
-        )
-        self.add_item(btn)
-
     def _add_fixed_nav(self, game: dict, stage: str) -> None:
         """
-        Rows 3–4 are identical across stages (positions never jump):
-          row 3: Back | Pencil | ·
-          row 4: Hint | I QUITTT | ·
+        Row 3 — aligned with the 3-column pad:
+          Back | Pencil | I QUITTT
         """
         back = discord.ui.Button(
             label="Back",
@@ -1994,26 +1950,15 @@ class SudokuView(discord.ui.View):
         )
         pencil.callback = self.on_toggle_pencil
         self.add_item(pencil)
-        self._add_spacer(3, "nav:mid")
-
-        hint = discord.ui.Button(
-            label="Hint",
-            style=discord.ButtonStyle.secondary,
-            row=4,
-            custom_id=self._cid("nav:hint"),
-        )
-        hint.callback = self.on_hint
-        self.add_item(hint)
 
         quit_btn = discord.ui.Button(
             label="I QUITTT",
             style=discord.ButtonStyle.danger,
-            row=4,
+            row=3,
             custom_id=self._cid("nav:quit"),
         )
         quit_btn.callback = self.on_forfeit
         self.add_item(quit_btn)
-        self._add_spacer(4, "nav:end")
 
     async def on_nav_back(self, interaction: discord.Interaction) -> None:
         game = games.get(self.game_key)
@@ -2310,88 +2255,6 @@ class SudokuView(discord.ui.View):
         await self.refresh(interaction)
         await sync_challenge_board(game)
 
-    async def on_hint(self, interaction: discord.Interaction) -> None:
-        game = games.get(self.game_key)
-        if not game:
-            await interaction.response.send_message("This game has ended.", ephemeral=True)
-            return
-        if interaction.guild is None:
-            await interaction.response.send_message("Server only.", ephemeral=True)
-            return
-        if interaction.user.id != game["owner_id"]:
-            await interaction.response.send_message("Not your board.", ephemeral=True)
-            return
-
-        gstats = guild_stats(self.bot.data, interaction.guild.id)
-        stats = user_stats(gstats, interaction.user.id)
-        if stats["hints"] <= 0:
-            await interaction.response.send_message(
-                "No hints left. Buy one in `/shop`.",
-                ephemeral=True,
-            )
-            return
-        empties = empty_cells(game["board"])
-        if not empties:
-            conflicts = find_conflicts(game["board"])
-            msg = (
-                "Board is full but has conflicts — fix the red cells first."
-                if conflicts
-                else "Board is already full!"
-            )
-            await interaction.response.send_message(msg, ephemeral=True)
-            return
-
-        # Defer before spending inventory / Mongo — Render can exceed Discord's 3s limit.
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer()
-        except discord.HTTPException:
-            pass
-
-        random.shuffle(empties)
-        r, c = empties[0]
-        digit = game["solution"][r][c]
-        set_cell_value(game["board"], r, c, digit)
-        game["hints_used"] = game.get("hints_used", 0) + 1
-        game["sel_r"], game["sel_c"] = r, c
-        game["box_id"] = (r // 3) * 3 + (c // 3)
-        game["ui_stage"] = STAGE_NUMBER
-        stats["hints"] -= 1
-        save_data(self.bot.data)
-        await sync_challenge_board(game)
-        await persist_game(self.game_key, game)
-
-        if is_complete(game["board"], game["solution"]) and not find_conflicts(game["board"]):
-            if game.get("mode") == "challenge":
-                await handle_challenge_completion(self.bot, interaction, game, self)
-                return
-            embed = await finish_win_and_announce(
-                self.bot,
-                interaction.guild.id,
-                interaction.user,
-                game,
-            )
-            image = render_board(
-                game["board"],
-                game["given"],
-                solution=game["solution"],
-                conflicts=set(),
-                difficulty=game.get("difficulty"),
-            )
-            file = board_to_file(image)
-            await remove_game(self.game_key)
-            self.stop()
-            await interaction.edit_original_response(
-                content=" ",
-                embed=None,
-                view=None,
-                attachments=[file],
-            )
-            await interaction.followup.send(embed=embed)
-            return
-
-        await self.refresh(interaction)
-
     async def on_forfeit(self, interaction: discord.Interaction) -> None:
         game = games.get(self.game_key)
         if not game:
@@ -2434,15 +2297,7 @@ class ShopSelect(discord.ui.Select):
             )
             for tid, meta in SHOP_TITLES.items()
         ]
-        for cid, meta in SHOP_CONSUMABLES.items():
-            options.append(
-                discord.SelectOption(
-                    label=f"{meta['label']} — {meta['cost']} coins",
-                    value=f"item:{cid}",
-                    description=meta["desc"][:100],
-                )
-            )
-        super().__init__(placeholder="Buy an item…", options=options)
+        super().__init__(placeholder="Buy a title…", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.guild is None:
@@ -2453,31 +2308,17 @@ class ShopSelect(discord.ui.Select):
         stats = user_stats(gstats, interaction.user.id)
         stats["name"] = interaction.user.display_name
 
-        if choice.startswith("title:"):
-            tid = choice.split(":", 1)[1]
-            meta = SHOP_TITLES[tid]
-            if tid in stats["owned_titles"]:
-                stats["title"] = tid
-                save_data(self.bot.data)
-                await interaction.response.send_message(f"Equipped **{meta['label']}**.", ephemeral=True)
-                return
-            if stats["coins"] < meta["cost"]:
-                await interaction.response.send_message(
-                    f"Need **{meta['cost']}** coins (you have {stats['coins']}).",
-                    ephemeral=True,
-                )
-                return
-            stats["coins"] -= meta["cost"]
-            stats["owned_titles"].append(tid)
-            stats["title"] = tid
-            save_data(self.bot.data)
-            await interaction.response.send_message(
-                f"Bought **{meta['label']}** (−{meta['cost']}). Balance: **{stats['coins']}**.",
-                ephemeral=True,
-            )
+        if not choice.startswith("title:"):
+            await interaction.response.send_message("Unknown item.", ephemeral=True)
             return
 
-        meta = SHOP_CONSUMABLES["hint"]
+        tid = choice.split(":", 1)[1]
+        meta = SHOP_TITLES[tid]
+        if tid in stats["owned_titles"]:
+            stats["title"] = tid
+            save_data(self.bot.data)
+            await interaction.response.send_message(f"Equipped **{meta['label']}**.", ephemeral=True)
+            return
         if stats["coins"] < meta["cost"]:
             await interaction.response.send_message(
                 f"Need **{meta['cost']}** coins (you have {stats['coins']}).",
@@ -2485,10 +2326,11 @@ class ShopSelect(discord.ui.Select):
             )
             return
         stats["coins"] -= meta["cost"]
-        stats["hints"] += 1
+        stats["owned_titles"].append(tid)
+        stats["title"] = tid
         save_data(self.bot.data)
         await interaction.response.send_message(
-            f"Bought a **Hint** (−{meta['cost']}). Inventory: **{stats['hints']}**. Use `/hint` in a game.",
+            f"Bought **{meta['label']}** (−{meta['cost']}). Balance: **{stats['coins']}**.",
             ephemeral=True,
         )
 
@@ -2546,7 +2388,7 @@ STATUS_ROTATION = [
     discord.Game(name="/play · Sudoku 9×9"),
     discord.Game(name="/challenge · Speedrun"),
     discord.Game(name="/daily · Daily puzzle"),
-    discord.Game(name="/shop · Titles & hints"),
+    discord.Game(name="/shop · Titles"),
 ]
 _status_i = 0
 
@@ -2673,7 +2515,7 @@ async def help_cmd(interaction: discord.Interaction):
         name="Rewards",
         value=(
             f"Solve **+{BASE_WIN_REWARD}** · Daily **+{DAILY_BONUS}** · "
-            f"Streak **+{STREAK_BONUS_PER}**/lvl · Hint **−{HINT_PENALTY}** · "
+            f"Streak **+{STREAK_BONUS_PER}**/lvl · "
             f"Challenge win **×{CHALLENGE_WIN_MULT:g}** · loss **+{CHALLENGE_LOSER_COINS}**\n"
             f"{tiers}"
         ),
@@ -2681,7 +2523,7 @@ async def help_cmd(interaction: discord.Interaction):
     )
     embed.add_field(
         name="More",
-        value="`/hint` `/shop` `/quit` `/leaderboard` `/stats` `/dailyboard`",
+        value="`/shop` `/quit` `/leaderboard` `/stats` `/dailyboard`",
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2962,7 +2804,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
         return
 
     winners = [(uid, r) for uid, r in results.items() if r.get("won")]
-    winners.sort(key=lambda item: (item[1].get("time", 10**9), item[1].get("hints", 99)))
+    winners.sort(key=lambda item: item[1].get("time", 10**9))
     lines = []
     medals = ["1.", "2.", "3."]
     for i, (uid, r) in enumerate(winners[:10]):
@@ -2971,7 +2813,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
         stats = user_stats(gstats, int(uid))
         name = display_name(stats) if stats.get("name") != "Unknown" else r.get("name", uid)
         lines.append(
-            f"{prefix} **{name}** — {format_time(r.get('time', 0))} · {r.get('hints', 0)} hints"
+            f"{prefix} **{name}** — {format_time(r.get('time', 0))}"
         )
 
     failed = sum(1 for r in results.values() if not r.get("won"))
@@ -2987,144 +2829,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="hint", description="Reveal one correct empty cell (uses inventory)")
-async def hint_cmd(interaction: discord.Interaction):
-    if interaction.guild is None:
-        await interaction.response.send_message("Server only.", ephemeral=True)
-        return
-
-    found = None
-    sk = solo_key(interaction.guild.id, interaction.user.id)
-    if sk in games and games[sk]["mode"] in ("solo", "daily"):
-        found = (sk, games[sk])
-    else:
-        ch = find_challenge_game_for_user(interaction.user.id)
-        if ch is not None:
-            found = (ch, games[ch])
-
-    if not found:
-        await interaction.response.send_message("No active game. Start `/play` or `/daily`.", ephemeral=True)
-        return
-
-    key, game = found
-    if interaction.user.id != game["owner_id"]:
-        await interaction.response.send_message("Not your board.", ephemeral=True)
-        return
-
-    gstats = guild_stats(bot.data, interaction.guild.id)
-    stats = user_stats(gstats, interaction.user.id)
-    if stats["hints"] <= 0:
-        await interaction.response.send_message("No hints left. Buy one in `/shop`.", ephemeral=True)
-        return
-
-    empties = empty_cells(game["board"])
-    if not empties:
-        conflicts = find_conflicts(game["board"])
-        msg = (
-            "Board is full but has conflicts — fix the red cells first."
-            if conflicts
-            else "Board is already full!"
-        )
-        await interaction.response.send_message(msg, ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    random.shuffle(empties)
-    r, c = empties[0]
-    digit = game["solution"][r][c]
-    set_cell_value(game["board"], r, c, digit)
-    game["hints_used"] = game.get("hints_used", 0) + 1
-    game["sel_r"], game["sel_c"] = r, c
-    game["box_id"] = (r // 3) * 3 + (c // 3)
-    game["ui_stage"] = STAGE_NUMBER
-    stats["hints"] -= 1
-    save_data(bot.data)
-    await sync_challenge_board(game)
-    await persist_game(key, game)
-
-    await interaction.followup.send(
-        f"Hint: **{cell_label(r, c)}** → **{digit}**. Hints left: **{stats['hints']}**.",
-        ephemeral=True,
-    )
-
-    if is_complete(game["board"], game["solution"]) and not find_conflicts(game["board"]):
-        if game.get("mode") == "challenge":
-            finished_at = time.time()
-            elapsed = finished_at - float(game["started_at"])
-            match = await match_store.update_player(
-                game["match_id"],
-                game["player_slot"],
-                {
-                    "current_board": copy_grid(game["board"]),
-                    "finished_time": finished_at,
-                    "elapsed": elapsed,
-                },
-            )
-            await remove_game(key)
-            channel = bot.get_channel(game.get("channel_id"))
-            if game.get("message_id") and channel is not None:
-                try:
-                    msg = await channel.fetch_message(game["message_id"])
-                    image = render_board(
-                        game["board"],
-                        game["given"],
-                        solution=game["solution"],
-                        conflicts=set(),
-                        difficulty=game.get("difficulty"),
-                    )
-                    caption = f"**Board complete** · Time: **{format_time(elapsed)}** (hint finish)."
-                    file = board_to_file(image)
-                    await msg.edit(content=caption, embed=None, view=None, attachments=[file])
-                except discord.HTTPException:
-                    pass
-            if match and challenge_ready_to_settle(match):
-                await settle_challenge_match(bot, match, reason="all finished")
-            return
-
-        embed = await finish_win_and_announce(
-            bot,
-            interaction.guild.id,
-            interaction.user,
-            game,
-        )
-        image = render_board(
-            game["board"],
-            game["given"],
-            solution=game["solution"],
-            conflicts=set(),
-            difficulty=game.get("difficulty"),
-        )
-        file = board_to_file(image)
-        await remove_game(key)
-        channel = bot.get_channel(game.get("channel_id"))
-        if game.get("message_id") and channel is not None:
-            try:
-                msg = await channel.fetch_message(game["message_id"])
-                await msg.edit(
-                    content=" ",
-                    embed=None,
-                    view=None,
-                    attachments=[file],
-                )
-            except discord.HTTPException:
-                pass
-        await interaction.followup.send(embed=embed)
-        return
-
-    channel = bot.get_channel(game.get("channel_id"))
-    if game.get("message_id") and channel is not None:
-        try:
-            msg = await channel.fetch_message(game["message_id"])
-            view = SudokuView(key, bot)
-            content, file = board_file_for(game)
-            await msg.edit(content=content, embed=None, attachments=[file], view=view)
-            view.message = msg
-        except discord.HTTPException:
-            pass
-
-
-@bot.tree.command(name="shop", description="Buy titles and hints")
+@bot.tree.command(name="shop", description="Buy cosmetic titles")
 async def shop_cmd(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
@@ -3138,7 +2843,6 @@ async def shop_cmd(interaction: discord.Interaction):
     embed = paper_embed("✏️ Shop")
     embed.add_field(name="Balance", value=str(stats["coins"]), inline=True)
     embed.add_field(name="Title", value=equipped, inline=True)
-    embed.add_field(name="Hints", value=str(stats["hints"]), inline=True)
     embed.add_field(name="Owned", value=owned, inline=False)
     await interaction.response.send_message(embed=embed, view=ShopView(bot), ephemeral=True)
 
@@ -3259,7 +2963,6 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
     embed.add_field(name="Best time", value=best, inline=True)
     embed.add_field(name="Streak", value=str(s["streak"]), inline=True)
     embed.add_field(name="Best streak", value=str(s["best_streak"]), inline=True)
-    embed.add_field(name="Hints", value=str(s.get("hints", 0)), inline=True)
     await interaction.response.send_message(embed=embed)
 
 
