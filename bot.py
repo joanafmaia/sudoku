@@ -70,24 +70,23 @@ COLOR_PAPER = discord.Color.from_str("#F4F1EA")
 COLOR_PAPER_WHITE = discord.Color.from_str("#FEFEFE")
 COLOR_DANGER = discord.Color.from_str("#B91C1C")  # forfeit / hard errors only
 
-# Discord dark slate theme — large standalone board (not embed-sized)
-RGB_BG = "#36393F"                # Discord dark slate canvas
-RGB_CARD = "#2F3136"              # rounded panel behind the grid
-RGB_CARD_BORDER = "#B9BBBE"       # soft light-gray outer rim
-RGB_EMPTY = "#40444B"             # cell fill
-RGB_GIVEN_CELL = "#36393F"        # slightly darker wash for clues
-RGB_SELECT = "#4F545C"            # selected cell
-RGB_BOX_HL = "#3C3F45"            # active 3×3 highlight
-RGB_CONFLICT = "#5C2B2B"          # soft red conflict wash
-RGB_LINE = "#4E5058"              # soft low-contrast cell dividers
-RGB_THICK = "#8E9297"             # clearer 3×3 block borders
-RGB_TEXT = "#FFFFFF"              # player ink — crisp on dark cells
-RGB_TEXT_GIVEN = "#1E1F22"        # locked clues — near-black (drawn on light chips)
-RGB_GIVEN_CHIP = "#DCDDDE"        # light chip behind given digits
-RGB_TEXT_CONFLICT = "#FA777C"     # conflict digits
-RGB_PENCIL = "#A3A6AA"            # draft marks
-RGB_HEADER = "#DCDDDE"            # caption text on slate
-RGB_OUTLINE = "#C7C8CA"           # selection / box focus ring
+# Light Paper theme — high-contrast standalone board (not embed-sized)
+RGB_BG = "#F5F4F0"                # light cream canvas
+RGB_CARD = "#FFFFFF"              # white paper panel
+RGB_CARD_BORDER = "#C8C5BE"       # soft paper rim
+RGB_EMPTY = "#FFFFFF"             # empty cells
+RGB_GIVEN_CELL = "#F8F7F4"        # subtle wash for locked clues
+RGB_SELECT = "#B8D9F8"            # selected cell (light blue)
+RGB_BOX_HL = "#D6EBFA"            # selected 3×3 wash (light blue)
+RGB_CONFLICT = "#FECACA"          # soft red conflict wash
+RGB_LINE = "#A0A0A0"              # clean dark-gray cell lines
+RGB_THICK = "#202020"             # sharp charcoal 3×3 borders
+RGB_TEXT = "#1D4ED8"              # player ink — deep blue
+RGB_TEXT_GIVEN = "#111111"        # locked clues — sharp black
+RGB_TEXT_CONFLICT = "#B91C1C"
+RGB_PENCIL = "#6B7280"            # draft marks
+RGB_HEADER = "#44403C"
+RGB_OUTLINE = "#007BFF"           # vibrant blue selection ring
 
 # Fixed Discord attachment canvas — larger = fuller chat preview
 BOARD_CANVAS = 720
@@ -210,6 +209,30 @@ async def remove_game(key: tuple) -> dict | None:
     game = games.pop(key, None)
     await drop_persisted_game(key)
     return game
+
+
+async def load_persisted_game(key: tuple) -> dict | None:
+    """Return an in-memory game, restoring from Mongo/memory store if needed."""
+    if key in games:
+        return games[key]
+    gid = serialize_game_key(key)
+    try:
+        docs = await match_store.list_active_games()
+    except Exception as exc:  # noqa: BLE001
+        print(f"load_persisted_game failed: {exc}")
+        return None
+    for doc in docs:
+        if (doc.get("_id") or doc.get("game_key")) != gid:
+            continue
+        raw = doc.get("game")
+        if not isinstance(raw, dict):
+            return None
+        game = raw
+        game["board"] = normalize_board(game.get("board") or [])
+        game["participants"] = set(game.get("participants") or [game.get("owner_id")])
+        games[key] = game
+        return game
+    return None
 
 
 def deepcopy_game(game: dict) -> dict:
@@ -536,7 +559,7 @@ def render_board(
     highlight_box: int | None = None,
     difficulty: str | None = None,
 ) -> BytesIO:
-    """Dark slate board with rounded card — sized for standalone Discord attachments."""
+    """Light Paper board — high-contrast grid + vivid blue selection."""
     _ = solution
     conflicts = conflicts or set()
     canvas = BOARD_CANVAS
@@ -548,7 +571,6 @@ def render_board(
     img = Image.new("RGB", (canvas, canvas), RGB_BG)
     draw = ImageDraw.Draw(img)
 
-    # Difficulty label on the dark canvas (above the card)
     tier_name = difficulty_label(difficulty)
     header_font = board_font(17, bold=False)
     hb = draw.textbbox((0, 0), tier_name, font=header_font)
@@ -560,11 +582,9 @@ def render_board(
         font=header_font,
     )
 
-    # Rounded outer container
     card = (pad, header_h, canvas - pad, canvas - pad)
     draw.rounded_rectangle(card, radius=radius, fill=RGB_CARD, outline=RGB_CARD_BORDER, width=2)
 
-    # Grid geometry inside the card
     grid_left = pad + inner
     grid_top = header_h + inner
     grid_right = canvas - pad - inner
@@ -614,13 +634,6 @@ def render_board(
                     color = RGB_TEXT_CONFLICT
                     font = font_player
                 elif given[r][c]:
-                    # Light chip so near-black clues stay readable on dark cells
-                    chip = max(4, cell // 10)
-                    draw.rounded_rectangle(
-                        (x0 + chip, y0 + chip, x1 - chip, y1 - chip),
-                        radius=max(4, cell // 8),
-                        fill=RGB_GIVEN_CHIP,
-                    )
                     color = RGB_TEXT_GIVEN
                     font = font_given
                 else:
@@ -655,7 +668,7 @@ def render_board(
                         font=pencil_font,
                     )
 
-    # Soft cell lines, stronger 3×3 borders (no harsh black)
+    # Cell lines first, then bold 3×3 charcoal borders
     for i in range(10):
         is_block = i % 3 == 0
         width_line = 3 if is_block else 1
@@ -665,30 +678,35 @@ def render_board(
         draw.line((origin_x, pos_y, origin_x + grid, pos_y), fill=color, width=width_line)
         draw.line((pos_x, origin_y, pos_x, origin_y + grid), fill=color, width=width_line)
 
-    # Re-draw outer card rim so grid lines don't cover the rounded border
     draw.rounded_rectangle(card, radius=radius, outline=RGB_CARD_BORDER, width=2)
 
-    if highlight_box is not None and selected is None:
+    # High-contrast selection — drawn last so it stays visible over grid lines
+    if highlight_box is not None:
         br, bc = highlight_box // 3, highlight_box % 3
-        x0 = origin_x + bc * 3 * cell
-        y0 = origin_y + br * 3 * cell
-        draw.rounded_rectangle(
-            (x0 + 1, y0 + 1, x0 + 3 * cell - 1, y0 + 3 * cell - 1),
-            radius=6,
-            outline=RGB_OUTLINE,
-            width=2,
-        )
+        bx0 = origin_x + bc * 3 * cell
+        by0 = origin_y + br * 3 * cell
+        bx1 = bx0 + 3 * cell
+        by1 = by0 + 3 * cell
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        od.rectangle((bx0, by0, bx1, by1), fill=(173, 216, 230, 90))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        if selected is None:
+            draw.rectangle((bx0 + 1, by0 + 1, bx1 - 1, by1 - 1), outline=RGB_OUTLINE, width=4)
 
     if selected is not None:
         r, c = selected
         x0 = origin_x + c * cell
         y0 = origin_y + r * cell
-        draw.rounded_rectangle(
-            (x0 + 2, y0 + 2, x0 + cell - 2, y0 + cell - 2),
-            radius=5,
-            outline=RGB_OUTLINE,
-            width=2,
-        )
+        x1 = x0 + cell
+        y1 = y0 + cell
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        od.rectangle((x0, y0, x1, y1), fill=(173, 216, 230, 120))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((x0 + 1, y0 + 1, x1 - 1, y1 - 1), outline=RGB_OUTLINE, width=4)
 
     out = BytesIO()
     img.save(out, format="PNG", compress_level=1)
@@ -1825,55 +1843,79 @@ class BoardRefreshView(discord.ui.View):
 
 
 class ConfirmQuitView(discord.ui.View):
-    """Challenge quit confirmation (ephemeral)."""
+    """Ephemeral quit confirmation for challenge / daily / solo."""
 
-    def __init__(self, game_key: tuple, bot: "SudokuBot", parent: "SudokuView"):
+    def __init__(
+        self,
+        game_key: tuple,
+        bot: "SudokuBot",
+        parent: "SudokuView | None" = None,
+    ):
         super().__init__(timeout=30)
         self.game_key = game_key
         self.bot = bot
         self.parent = parent
 
+    async def _edit_board_message(
+        self,
+        game: dict,
+        *,
+        embed: discord.Embed,
+    ) -> None:
+        channel = self.bot.get_channel(game.get("channel_id"))
+        if not game.get("message_id") or channel is None:
+            return
+        try:
+            msg = await channel.fetch_message(game["message_id"])
+            await msg.edit(content=None, embed=embed, view=None, attachments=[])
+        except discord.HTTPException:
+            pass
+
     @discord.ui.button(label="I QUITTT", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         game = games.get(self.game_key)
-        if not game or game.get("mode") != "challenge":
+        if not game:
             await interaction.response.edit_message(content="Game already ended.", view=None)
             self.stop()
             return
         if interaction.user.id != game["owner_id"]:
             await interaction.response.send_message("Not your board.", ephemeral=True)
             return
+
+        mode = game.get("mode")
         await interaction.response.edit_message(content="Quitting…", view=None)
         self.stop()
-        match_id = game["match_id"]
-        slot = game["player_slot"]
-        match = await match_store.update_player(
-            match_id,
-            slot,
-            {"forfeit": True, "finished_time": None},
-        )
-        self.parent.stop()
+        if self.parent is not None:
+            self.parent.stop()
+
+        if mode == "challenge":
+            match_id = game["match_id"]
+            slot = game["player_slot"]
+            match = await match_store.update_player(
+                match_id,
+                slot,
+                {"forfeit": True, "finished_time": None},
+            )
+            await remove_game(self.game_key)
+            embed = paper_embed(
+                "I QUITTT",
+                description="You're out. Remaining players keep racing.",
+            )
+            await self._edit_board_message(game, embed=embed)
+            if match:
+                await settle_challenge_match(self.bot, match, reason="quit")
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            return
+        embed = finish_forfeit(self.bot.data, guild.id, interaction.user, game)
         await remove_game(self.game_key)
-        channel = self.bot.get_channel(game.get("channel_id"))
-        if game.get("message_id") and channel is not None:
-            try:
-                msg = await channel.fetch_message(game["message_id"])
-                await msg.edit(
-                    embed=paper_embed(
-                        "I QUITTT",
-                        description="You're out. Remaining players keep racing.",
-                    ),
-                    view=None,
-                    attachments=[],
-                )
-            except discord.HTTPException:
-                pass
-        if match:
-            await settle_challenge_match(self.bot, match, reason="quit")
+        await self._edit_board_message(game, embed=embed)
 
     @discord.ui.button(label="Keep playing", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(content="Still in the race.", view=None)
+        await interaction.response.edit_message(content="Still playing.", view=None)
         self.stop()
 
 
@@ -2216,9 +2258,14 @@ class SudokuView(discord.ui.View):
             await self.refresh(interaction, status=f"**{label}** is a locked clue.")
             return
 
-        # Pencil mode: toggle draft, keep keypad open (Stage 3)
+        # Pencil mode: toggle draft marks only (never erase a placed digit)
         if game.get("pencil_mode"):
-            set_cell_value(game["board"], r, c, 0)
+            if cell_value(game["board"], r, c):
+                await self.refresh(
+                    interaction,
+                    status=f"**{label}** has a number — erase it in pen mode before penciling.",
+                )
+                return
             notes = toggle_pencil(game["board"], r, c, digit)
             game["ui_stage"] = STAGE_NUMBER
             await self.refresh(
@@ -2301,14 +2348,30 @@ class SudokuView(discord.ui.View):
             return
         empties = empty_cells(game["board"])
         if not empties:
-            await interaction.response.send_message("Board is already full!", ephemeral=True)
+            conflicts = find_conflicts(game["board"])
+            msg = (
+                "Board is full but has conflicts — fix the red cells first."
+                if conflicts
+                else "Board is already full!"
+            )
+            await interaction.response.send_message(msg, ephemeral=True)
             return
+
+        # Defer before spending inventory / Mongo — Render can exceed Discord's 3s limit.
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except discord.HTTPException:
+            pass
 
         random.shuffle(empties)
         r, c = empties[0]
         digit = game["solution"][r][c]
         set_cell_value(game["board"], r, c, digit)
         game["hints_used"] = game.get("hints_used", 0) + 1
+        game["sel_r"], game["sel_c"] = r, c
+        game["box_id"] = (r // 3) * 3 + (c // 3)
+        game["ui_stage"] = STAGE_NUMBER
         stats["hints"] -= 1
         save_data(self.bot.data)
         await sync_challenge_board(game)
@@ -2334,7 +2397,7 @@ class SudokuView(discord.ui.View):
             file = board_to_file(image)
             await remove_game(self.game_key)
             self.stop()
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="**Puzzle solved!**",
                 embed=None,
                 view=None,
@@ -2349,29 +2412,30 @@ class SudokuView(discord.ui.View):
         )
 
     async def on_forfeit(self, interaction: discord.Interaction) -> None:
-        game = games[self.game_key]
-        if game.get("mode") == "challenge":
-            if interaction.user.id != game["owner_id"]:
-                await interaction.response.send_message("Not your challenge board.", ephemeral=True)
-                return
-            await interaction.response.send_message(
-                "Really leave this speedrun?",
-                view=ConfirmQuitView(self.game_key, self.bot, self),
-                ephemeral=True,
-            )
+        game = games.get(self.game_key)
+        if not game:
+            await interaction.response.send_message("This game has ended.", ephemeral=True)
             return
-
-        if interaction.guild is None:
-            return
-
-        if game["mode"] in ("solo", "daily") and interaction.user.id != game["owner_id"]:
+        if interaction.user.id != game["owner_id"]:
             await interaction.response.send_message("Only the owner can quit.", ephemeral=True)
             return
+        if interaction.guild is None:
+            await interaction.response.send_message("Server only.", ephemeral=True)
+            return
 
-        embed = finish_forfeit(self.bot.data, interaction.guild.id, interaction.user, game)
-        await remove_game(self.game_key)
-        self.stop()
-        await interaction.response.edit_message(embed=embed, view=None, attachments=[])
+        mode = game.get("mode")
+        if mode == "challenge":
+            prompt = "Really leave this speedrun?"
+        elif mode == "daily":
+            prompt = "Quit today's daily? This locks your attempt and resets your streak."
+        else:
+            prompt = "Really quit this puzzle? Streak will reset."
+
+        await interaction.response.send_message(
+            prompt,
+            view=ConfirmQuitView(self.game_key, self.bot, self),
+            ephemeral=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2833,20 +2897,31 @@ async def daily_cmd(interaction: discord.Interaction):
     daily = get_guild_daily(bot.data, guild_id)
     if str(user_id) in daily["results"]:
         r = daily["results"][str(user_id)]
-        if r.get("won"):
-            detail = "cleared"
-        elif r.get("forfeit"):
-            detail = "used (quit)"
-        elif r.get("in_progress"):
-            detail = "already started"
+        if r.get("in_progress"):
+            restored = await load_persisted_game(sk)
+            if restored and restored.get("mode") == "daily":
+                await interaction.response.send_message(
+                    "You already started today's daily — continue on your board message "
+                    "(use **Refresh** if the buttons timed out).",
+                    ephemeral=True,
+                )
+                return
+            # Orphan lock (restart without recoverable session) — unlock and continue
+            daily["results"].pop(str(user_id), None)
+            save_data(bot.data)
         else:
-            detail = "already used"
-        await interaction.response.send_message(
-            f"You've already **{detail}** today's daily ({daily['date']}). "
-            f"Only **one** daily attempt per day — play more with `/play`, or check `/dailyboard`.",
-            ephemeral=True,
-        )
-        return
+            if r.get("won"):
+                detail = "cleared"
+            elif r.get("forfeit"):
+                detail = "used (quit)"
+            else:
+                detail = "already used"
+            await interaction.response.send_message(
+                f"You've already **{detail}** today's daily ({daily['date']}). "
+                f"Only **one** daily attempt per day — play more with `/play`, or check `/dailyboard`.",
+                ephemeral=True,
+            )
+            return
 
     # Lock the attempt immediately so a restart can't grant a second daily
     daily["results"][str(user_id)] = {
@@ -2867,7 +2942,22 @@ async def daily_cmd(interaction: discord.Interaction):
         daily_date=daily["date"],
         difficulty=daily.get("difficulty_key") or daily_difficulty_for_date(daily["date"]),
     )
-    await start_panel(interaction, sk, games[sk])
+    try:
+        await start_panel(interaction, sk, games[sk])
+    except Exception:
+        await remove_game(sk)
+        daily["results"].pop(str(user_id), None)
+        save_data(bot.data)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Couldn't start the daily board. Try again.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "Couldn't start the daily board. Try again.",
+                ephemeral=True,
+            )
 
 
 @bot.tree.command(name="dailyboard", description="Today's daily Sudoku rankings")
@@ -2943,22 +3033,32 @@ async def hint_cmd(interaction: discord.Interaction):
 
     empties = empty_cells(game["board"])
     if not empties:
-        await interaction.response.send_message("Board is already full!", ephemeral=True)
+        conflicts = find_conflicts(game["board"])
+        msg = (
+            "Board is full but has conflicts — fix the red cells first."
+            if conflicts
+            else "Board is already full!"
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
         return
+
+    await interaction.response.defer(ephemeral=True)
 
     random.shuffle(empties)
     r, c = empties[0]
     digit = game["solution"][r][c]
     set_cell_value(game["board"], r, c, digit)
     game["hints_used"] = game.get("hints_used", 0) + 1
+    game["sel_r"], game["sel_c"] = r, c
+    game["box_id"] = (r // 3) * 3 + (c // 3)
+    game["ui_stage"] = STAGE_NUMBER
     stats["hints"] -= 1
     save_data(bot.data)
     await sync_challenge_board(game)
     await persist_game(key, game)
 
-    await interaction.response.send_message(
-        f"Hint: row **{r + 1}**, col **{c + 1}** → **{digit}**. "
-        f"Hints left: **{stats['hints']}**.",
+    await interaction.followup.send(
+        f"Hint: **{cell_label(r, c)}** → **{digit}**. Hints left: **{stats['hints']}**.",
         ephemeral=True,
     )
 
@@ -3030,8 +3130,13 @@ async def hint_cmd(interaction: discord.Interaction):
     if game.get("message_id") and channel is not None:
         try:
             msg = await channel.fetch_message(game["message_id"])
-            content, file = board_file_for(game)
-            await msg.edit(content=content, embed=None, attachments=[file])
+            view = SudokuView(key, bot)
+            content, file = board_file_for(
+                game,
+                status=f"Hint: **{cell_label(r, c)}** → **{digit}** · left **{stats['hints']}**",
+            )
+            await msg.edit(content=content, embed=None, attachments=[file], view=view)
+            view.message = msg
         except discord.HTTPException:
             pass
 
@@ -3064,49 +3169,25 @@ async def quit_cmd(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     ch_key = find_challenge_game_for_user(interaction.user.id)
     if ch_key is not None:
-        game = games[ch_key]
-        await interaction.response.defer(ephemeral=True)
-        match_id = game["match_id"]
-        slot = game["player_slot"]
-        match = await match_store.update_player(
-            match_id,
-            slot,
-            {"forfeit": True, "finished_time": None},
+        await interaction.response.send_message(
+            "Really leave this speedrun?",
+            view=ConfirmQuitView(ch_key, bot, None),
+            ephemeral=True,
         )
-        await remove_game(ch_key)
-        if game.get("message_id"):
-            channel = bot.get_channel(game.get("channel_id"))
-            if channel is not None:
-                try:
-                    msg = await channel.fetch_message(game["message_id"])
-                    await msg.edit(
-                        embed=paper_embed("I QUITTT"),
-                        view=None,
-                        attachments=[],
-                    )
-                except discord.HTTPException:
-                    pass
-        if match:
-            await settle_challenge_match(bot, match, reason="quit")
-        await interaction.followup.send("I QUITTT — you're out of the challenge.", ephemeral=True)
         return
 
     sk = solo_key(guild_id, interaction.user.id)
     if sk in games:
         game = games[sk]
-        message_id = game.get("message_id")
-        channel_id = game.get("channel_id")
-        embed = finish_forfeit(bot.data, guild_id, interaction.user, game)
-        await remove_game(sk)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        if message_id:
-            channel = bot.get_channel(channel_id)
-            if channel is not None:
-                try:
-                    msg = await channel.fetch_message(message_id)
-                    await msg.edit(embed=embed, view=None, attachments=[])
-                except discord.HTTPException:
-                    pass
+        if game.get("mode") == "daily":
+            prompt = "Quit today's daily? This locks your attempt and resets your streak."
+        else:
+            prompt = "Really quit this puzzle? Streak will reset."
+        await interaction.response.send_message(
+            prompt,
+            view=ConfirmQuitView(sk, bot, None),
+            ephemeral=True,
+        )
         return
 
     await interaction.response.send_message("No game to quit.", ephemeral=True)
