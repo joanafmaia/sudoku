@@ -2833,12 +2833,28 @@ async def daily_cmd(interaction: discord.Interaction):
     daily = get_guild_daily(bot.data, guild_id)
     if str(user_id) in daily["results"]:
         r = daily["results"][str(user_id)]
-        state = "won" if r.get("won") else "finished"
+        if r.get("won"):
+            detail = "cleared"
+        elif r.get("forfeit"):
+            detail = "used (quit)"
+        elif r.get("in_progress"):
+            detail = "already started"
+        else:
+            detail = "already used"
         await interaction.response.send_message(
-            f"You already **{state}** today's daily ({daily['date']}). See `/dailyboard`.",
+            f"You've already **{detail}** today's daily ({daily['date']}). "
+            f"Only **one** daily attempt per day — play more with `/play`, or check `/dailyboard`.",
             ephemeral=True,
         )
         return
+
+    # Lock the attempt immediately so a restart can't grant a second daily
+    daily["results"][str(user_id)] = {
+        "won": False,
+        "in_progress": True,
+        "name": interaction.user.display_name,
+    }
+    save_data(bot.data)
 
     games[sk] = new_game_state(
         mode="daily",
