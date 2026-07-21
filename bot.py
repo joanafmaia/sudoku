@@ -497,6 +497,23 @@ def is_complete(board: list[list[dict]], solution: list[list[int]]) -> bool:
     return values_grid(board) == normalize_solution(solution)
 
 
+def is_solved(board: list[list[dict]], solution: list[list[int]] | None = None) -> bool:
+    """True when the grid is a finished valid Sudoku (full + no conflicts).
+
+    Prefer matching the stored solution, but a full conflict-free board still counts
+    as solved — avoids false "not solved" nags when solution data drifts after restore.
+    """
+    if filled_count(board) < 81:
+        return False
+    if find_conflicts(board):
+        return False
+    if solution:
+        sol = normalize_solution(solution)
+        if sol and values_grid(board) == sol:
+            return True
+    return True
+
+
 def filled_count(board: list[list[dict]]) -> int:
     return sum(1 for r in range(9) for c in range(9) if cell_value(board, r, c) != 0)
 
@@ -2351,8 +2368,8 @@ class SudokuView(discord.ui.View):
 
             current = cell_value(game["board"], r, c)
             if current == digit:
-                # Re-tap same digit = erase
-                if is_complete(game["board"], game["solution"]) and not find_conflicts(game["board"]):
+                # Re-tap same digit = erase (unless this completes the puzzle)
+                if is_solved(game["board"], game.get("solution")):
                     game["finishing"] = True
                     await self._celebrate_win(interaction, game)
                     return
@@ -2367,8 +2384,10 @@ class SudokuView(discord.ui.View):
 
             set_cell_value(game["board"], r, c, digit)
             conflicts = find_conflicts(game["board"])
+            full = filled_count(game["board"]) >= 81
 
-            if is_complete(game["board"], game["solution"]) and not conflicts:
+            # Win: full board with no conflicts (and/or matches stored solution)
+            if is_solved(game["board"], game.get("solution")):
                 game["finishing"] = True  # before any await — blocks concurrent erase
                 await sync_challenge_board(game)
                 await self._celebrate_win(interaction, game)
@@ -2376,15 +2395,16 @@ class SudokuView(discord.ui.View):
 
             await sync_challenge_board(game)
 
-            # Conflict (red) or board full — keep the number pad open so re-tap erases in one click
-            if (r, c) in conflicts or filled_count(game["board"]) >= 81:
+            # Conflict (red) or board full-but-wrong — keep pad open for re-tap erase
+            if (r, c) in conflicts or full:
                 game["ui_stage"] = STAGE_NUMBER
                 game["_digit_lock"] = False
                 await self.refresh(interaction)
-                if filled_count(game["board"]) >= 81 and (r, c) not in conflicts:
+                # Only nag when the board is full AND still has conflicts
+                if full and conflicts:
                     try:
                         await interaction.followup.send(
-                            f"{BUBBLE} Board is full but not solved — fix any red cells or wrong digits.",
+                            f"{BUBBLE} Board is full but has conflicts — fix the red cells.",
                             ephemeral=True,
                         )
                     except discord.HTTPException:
