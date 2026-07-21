@@ -2996,11 +2996,19 @@ async def _wait_ready():
     await bot.wait_until_ready()
 
 
-async def start_panel(interaction: discord.Interaction, key: tuple[int, int], game: dict) -> None:
+async def start_panel(
+    interaction: discord.Interaction,
+    key: tuple[int, int],
+    game: dict,
+    *,
+    silent: bool = True,
+) -> None:
     view = SudokuView(key, bot)
     content, file = board_file_for(game)
-    # Silent: /play and /daily shouldn't ping the channel (challenges stay loud)
-    await interaction.response.send_message(content=content, view=view, file=file, silent=True)
+    # /play stays silent; /daily can notify the channel
+    await interaction.response.send_message(
+        content=content, view=view, file=file, silent=silent
+    )
     view.message = await interaction.original_response()
     game["message_id"] = view.message.id
     await persist_game(key, game)
@@ -3414,7 +3422,7 @@ async def daily_cmd(interaction: discord.Interaction):
         board_theme=equipped_theme_id(stats),
     )
     try:
-        await start_panel(interaction, sk, games[sk])
+        await start_panel(interaction, sk, games[sk], silent=False)
     except Exception:
         await remove_game(sk)
         daily["results"].pop(str(user_id), None)
@@ -3477,7 +3485,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
         value="\n".join(lines) if lines else "No solves yet — the grill is cold.",
         inline=False,
     )
-    await interaction.response.send_message(embed=embed, silent=True)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="shop", description="Spend sponges at the Krusty Shop")
