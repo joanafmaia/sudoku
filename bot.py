@@ -51,7 +51,6 @@ CHALLENGE_LOSER_COINS = 25
 CHALLENGE_COOLDOWN_SEC = 60
 INVITE_TIMEOUT_SEC = 5 * 60
 DAILY_EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc).date()
-DAILY_ANNOUNCE_CHANNEL_ID = int(os.getenv("DAILY_ANNOUNCE_CHANNEL_ID", "0") or 0)
 
 # Fixed weekly difficulty for /daily (Monday=0 … Sunday=6)
 DAILY_WEEKDAY_DIFFICULTY = {
@@ -950,47 +949,6 @@ def build_daily_share_text(
     )
 
 
-def build_daily_achievement_embed(
-    user: discord.abc.User,
-    *,
-    day: str,
-    difficulty: str | None,
-    elapsed: float,
-    coins: int,
-    rank: int | None,
-    multiplier: float,
-    share_text: str,
-) -> discord.Embed:
-    medal = {1: "1st", 2: "2nd", 3: "3rd"}.get(rank or 0, f"#{rank}" if rank else "—")
-    embed = paper_embed(
-        f"Daily #{daily_puzzle_number(day)}",
-        description=f"{user.mention} cleared today's puzzle.",
-    )
-    embed.add_field(name="Time", value=format_time(elapsed), inline=True)
-    embed.add_field(name="Difficulty", value=difficulty_label(difficulty), inline=True)
-    embed.add_field(name="Rank", value=str(medal), inline=True)
-    embed.add_field(name="Reward", value=format_sponges(coins, signed=True), inline=True)
-    embed.add_field(name="Multiplier", value=f"×{multiplier:.2f}", inline=True)
-    embed.add_field(name="Share", value=f"```\n{share_text}\n```", inline=False)
-    return embed
-
-
-async def announce_daily_achievement(bot: "SudokuBot", embed: discord.Embed) -> None:
-    if not DAILY_ANNOUNCE_CHANNEL_ID:
-        return
-    channel = bot.get_channel(DAILY_ANNOUNCE_CHANNEL_ID)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(DAILY_ANNOUNCE_CHANNEL_ID)
-        except discord.HTTPException:
-            return
-    if isinstance(channel, (discord.TextChannel, discord.Thread)):
-        try:
-            await channel.send(embed=embed)
-        except discord.HTTPException:
-            pass
-
-
 def finish_win(
     data: dict,
     guild_id: int,
@@ -1007,10 +965,13 @@ def finish_win(
     is_daily = game["mode"] == "daily"
 
     if not award and is_daily:
-        return paper_embed(
-            f"{PINEAPPLE} Daily",
-            description="Today's reward was already claimed — no duplicate sponges.",
-        )
+        # Duplicate claim (Discord retry / double-tap after win already saved).
+        # Return a silent marker — never post a "already claimed" nag.
+        quiet = paper_embed(" ")
+        quiet._sudoku_coins = 0  # type: ignore[attr-defined]
+        quiet._sudoku_rank = None  # type: ignore[attr-defined]
+        quiet._sudoku_quiet = True  # type: ignore[attr-defined]
+        return quiet
 
     stats["wins"] += 1
     stats["games"] += 1
@@ -1108,27 +1069,13 @@ async def finish_win_and_announce(
         return finish_win(bot.data, guild_id, user, game, award=False)
 
     embed = finish_win(bot.data, guild_id, user, game)
-    coins = getattr(embed, "_sudoku_coins", preview_coins)
-    rank = getattr(embed, "_sudoku_rank", None)
-
     share = build_daily_share_text(
         day=day,
         difficulty=game.get("difficulty"),
         elapsed=elapsed,
     )
     embed.add_field(name="Share", value=f"```\n{share}\n```", inline=False)
-
-    announce = build_daily_achievement_embed(
-        user,
-        day=day,
-        difficulty=game.get("difficulty"),
-        elapsed=elapsed,
-        coins=int(coins),
-        rank=rank,
-        multiplier=difficulty_multiplier(game.get("difficulty")),
-        share_text=share,
-    )
-    await announce_daily_achievement(bot, announce)
+    # No channel announcement — players use `/dailyboard` if they want rankings.
     return embed
 
 
@@ -2397,18 +2344,32 @@ class SudokuView(discord.ui.View):
             )
             game["rewarded"] = True
             coins = int(getattr(embed, "_sudoku_coins", 0) or 0)
+            quiet = bool(getattr(embed, "_sudoku_quiet", False))
             image = render_board(
                 game["board"],
                 game["given"],
                 solution=game["solution"],
                 conflicts=set(),
                 difficulty=game.get("difficulty"),
-                reward_sponges=coins,
+                reward_sponges=None if quiet else coins,
             )
             file = board_to_file(image)
             key = self.game_key
             await remove_game(key)
             self.stop()
+
+            if quiet:
+                # Already awarded — close controls only, no extra chat message.
+                try:
+                    await interaction.edit_original_response(
+                        content=None,
+                        embed=None,
+                        view=None,
+                        attachments=[file],
+                    )
+                except discord.HTTPException:
+                    pass
+                return
 
             reward_line = f"{SPONGE} **Puzzle solved!** · {format_sponges(coins, signed=True)}"
             try:

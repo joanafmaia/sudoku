@@ -22,7 +22,7 @@ Interactive 9×9 Sudoku for Discord — solo, daily, and multiplayer speedrun ch
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env with your DISCORD_TOKEN (and optional Mongo / announce channel)
+# edit .env with your DISCORD_TOKEN (and optional Mongo)
 python bot.py
 ```
 
@@ -40,7 +40,6 @@ python bot.py
    - `DISCORD_TOKEN` (required)
    - `MONGODB_URI` (recommended)
    - `MONGODB_DB` (e.g. `sudoku`)
-   - `DAILY_ANNOUNCE_CHANNEL_ID` (optional, `0` to disable)
 5. Deploy and copy your public URL, e.g. `https://sudoku-xxxx.onrender.com`
 
 The bot serves `GET /` and `GET /health` (returns `ok`) so the free tier can be kept awake.
@@ -64,7 +63,6 @@ UptimeRobot will ping the health URL so Render is less likely to sleep.
 | `DISCORD_TOKEN` | yes | Bot token |
 | `MONGODB_URI` | no | Atlas/local URI (in-memory fallback if unset) |
 | `MONGODB_DB` | no | Database name (default `sudoku`) |
-| `DAILY_ANNOUNCE_CHANNEL_ID` | no | Public channel for daily clear announcements (`0` = off) |
 | `PORT` | no | HTTP port (Render sets this automatically) |
 
 Never commit `.env` — it is gitignored.
