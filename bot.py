@@ -2769,7 +2769,8 @@ async def _wait_ready():
 async def start_panel(interaction: discord.Interaction, key: tuple[int, int], game: dict) -> None:
     view = SudokuView(key, bot)
     content, file = board_file_for(game)
-    await interaction.response.send_message(content=content, view=view, file=file)
+    # Silent: /play and /daily shouldn't ping the channel (challenges stay loud)
+    await interaction.response.send_message(content=content, view=view, file=file, silent=True)
     view.message = await interaction.original_response()
     game["message_id"] = view.message.id
     await persist_game(key, game)
@@ -3238,7 +3239,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
         value="\n".join(lines) if lines else "No solves yet — the grill is cold.",
         inline=False,
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, silent=True)
 
 
 @bot.tree.command(name="shop", description="Spend sponges at the Krusty Shop")
@@ -3384,7 +3385,7 @@ async def leaderboard_cmd(
     embed = paper_embed(f"{title}")
     embed.description = f"{blurb}\n*{interaction.guild.name}*"
     embed.add_field(name="Top 10", value="\n".join(lines), inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, silent=True)
 
 
 @bot.tree.command(name="stats", description="Your Bikini Bottom Sudoku report card")
@@ -3426,7 +3427,7 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
     embed.add_field(name=f"Daily {PINEAPPLE}", value=f"**{s.get('daily_wins', 0)}** clears", inline=True)
     embed.add_field(name=f"Challenge {JELLY}", value=f"**{s.get('challenge_wins', 0)}** wins", inline=True)
     embed.add_field(name="Boards played", value=f"**{games_n}**", inline=True)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, silent=True)
 
 
 if __name__ == "__main__":
