@@ -56,6 +56,7 @@ class MatchStore:
         hints: int,
         difficulty: str,
         coins: int,
+        player_name: str | None = None,
     ) -> bool:
         """Atomically claim today's daily win. True = first claim (award + announce)."""
         raise NotImplementedError
@@ -128,6 +129,7 @@ class MemoryMatchStore(MatchStore):
         hints: int,
         difficulty: str,
         coins: int,
+        player_name: str | None = None,
     ) -> bool:
         key = self._daily_key(guild_id, user_id, day)
         if key in self._daily:
@@ -136,6 +138,7 @@ class MemoryMatchStore(MatchStore):
             "_id": key,
             "guild_id": guild_id,
             "user_id": user_id,
+            "name": player_name or "Unknown",
             "date": day,
             "elapsed": elapsed,
             "hints": hints,
@@ -226,6 +229,7 @@ class MongoMatchStore(MatchStore):
         hints: int,
         difficulty: str,
         coins: int,
+        player_name: str | None = None,
     ) -> bool:
         from pymongo.errors import DuplicateKeyError
 
@@ -238,6 +242,7 @@ class MongoMatchStore(MatchStore):
             "_id": f"{guild_id}:{day}:{user_id}",
             "guild_id": guild_id,
             "user_id": user_id,
+            "name": player_name or "Unknown",
             "date": day,
             "elapsed": elapsed,
             "hints": hints,
@@ -263,9 +268,10 @@ def create_match_store() -> MatchStore:
     return MemoryMatchStore()
 
 
-def _player_blob(user_id: int, template: list) -> dict:
+def _player_blob(user_id: int, template: list, *, name: str | None = None) -> dict:
     return {
         "user_id": user_id,
+        "name": name or "Unknown",
         "current_board": _clone(template),
         "thread_id": None,
         "finished_time": None,
@@ -295,12 +301,16 @@ def new_match_document(
     given: list,
     solution: list,
     difficulty: str,
+    player_names: list[str] | None = None,
 ) -> dict:
     if len(player_ids) < 2:
         raise ValueError("Challenge needs at least 2 players")
     start_time = time.time()
     template = _clone(board)
     slots = [f"player_{i}" for i in range(1, len(player_ids) + 1)]
+    names = list(player_names or [])
+    while len(names) < len(player_ids):
+        names.append("Unknown")
     doc: dict = {
         "_id": str(uuid.uuid4()),
         "guild_id": guild_id,
@@ -313,8 +323,10 @@ def new_match_document(
         "start_time": start_time,
         "player_slots": slots,
         "player_ids": list(player_ids),
+        "player_names": names[: len(player_ids)],
         "winner_id": None,
+        "winner_name": None,
     }
-    for slot, uid in zip(slots, player_ids):
-        doc[slot] = _player_blob(uid, template)
+    for slot, uid, pname in zip(slots, player_ids, names):
+        doc[slot] = _player_blob(uid, template, name=pname)
     return doc

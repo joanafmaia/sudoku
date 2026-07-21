@@ -381,6 +381,10 @@ async def persist_game(key: tuple, game: dict) -> None:
     payload = {
         "_id": serialize_game_key(key),
         "game_key": serialize_game_key(key),
+        "owner_id": snapshot.get("owner_id"),
+        "owner_name": snapshot.get("owner_name") or "Unknown",
+        "mode": snapshot.get("mode"),
+        "guild_id": snapshot.get("guild_id"),
         "game": snapshot,
     }
     try:
@@ -1156,6 +1160,7 @@ def new_game_state(
     player_slot: str | None = None,
     started_at: float | None = None,
     board_theme: str | None = None,
+    owner_name: str | None = None,
 ) -> dict:
     # Persist the human-readable tier name (e.g. "Expertttt")
     tier_name = difficulty_label(difficulty)
@@ -1171,6 +1176,7 @@ def new_game_state(
         "sel_c": 0,
         "pencil_mode": False,
         "owner_id": owner_id,
+        "owner_name": owner_name or "Unknown",
         "channel_id": channel_id,
         "guild_id": guild_id,
         "match_id": match_id,
@@ -1426,6 +1432,7 @@ async def finish_win_and_announce(
             hints=0,
             difficulty=tier,
             coins=preview_coins,
+            player_name=getattr(user, "display_name", None) or getattr(user, "name", None),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"try_claim_daily_win failed (local award kept): {exc}")
@@ -1567,9 +1574,20 @@ async def settle_challenge_match(
             winner_id = ranked[0]["user_id"]
             detail = "fastest finish"
 
+    winner_name = None
+    if winner_id is not None:
+        for _, p in entries:
+            if p.get("user_id") == winner_id:
+                winner_name = p.get("name")
+                break
     await match_store.update_match(
         match["_id"],
-        {"status": "finished", "winner_id": winner_id, "settle_reason": detail},
+        {
+            "status": "finished",
+            "winner_id": winner_id,
+            "winner_name": winner_name,
+            "settle_reason": detail,
+        },
     )
 
     for _slot, player in entries:
@@ -1607,6 +1625,9 @@ async def settle_challenge_match(
 
     reward_embed = None
     if winner_user is not None:
+        wname = getattr(winner_user, "display_name", None) or winner_user.name
+        if wname and wname != winner_name:
+            await match_store.update_match(match["_id"], {"winner_name": wname})
         reward_embed = finish_win(
             bot.data,
             guild_id,
@@ -1771,6 +1792,7 @@ async def launch_challenge_match(
     board, given, solution = make_puzzle(difficulty)
     tier = difficulty_label(difficulty)
     player_ids = [m.id for m in players]
+    player_names = [m.display_name for m in players]
     doc = new_match_document(
         guild_id=interaction.guild.id,
         channel_id=interaction.channel.id,
@@ -1779,6 +1801,7 @@ async def launch_challenge_match(
         given=given,
         solution=solution,
         difficulty=tier,
+        player_names=player_names,
     )
     match_id = await match_store.insert_match(doc)
     match = await match_store.get_match(match_id)
@@ -1795,7 +1818,9 @@ async def launch_challenge_match(
             f"sudoku-{len(players)}p-{member.display_name}"[:90],
         )
         thread_id = getattr(dest, "id", None)
-        await match_store.update_player(match_id, slot, {"thread_id": thread_id})
+        await match_store.update_player(
+            match_id, slot, {"thread_id": thread_id, "name": member.display_name}
+        )
         destinations.append((slot, member, dest))
 
     roster = ", ".join(m.mention for m in players)
@@ -1809,6 +1834,7 @@ async def launch_challenge_match(
             given=given,
             solution=solution,
             owner_id=member.id,
+            owner_name=member.display_name,
             channel_id=getattr(dest, "id", interaction.channel.id),
             guild_id=interaction.guild.id,
             match_id=match_id,
@@ -3222,6 +3248,7 @@ async def play_cmd(
         given=given,
         solution=solution,
         owner_id=user_id,
+        owner_name=interaction.user.display_name,
         channel_id=interaction.channel_id,
         guild_id=guild_id,
         difficulty=diff_key,
@@ -3451,6 +3478,7 @@ async def daily_cmd(interaction: discord.Interaction):
         given=given,
         solution=solution,
         owner_id=user_id,
+        owner_name=interaction.user.display_name,
         channel_id=interaction.channel_id,
         guild_id=guild_id,
         daily_date=daily["date"],
