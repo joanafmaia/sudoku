@@ -7,6 +7,7 @@ import json
 import os
 import random
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -238,6 +239,7 @@ async def load_persisted_game(key: tuple) -> dict | None:
         game["participants"] = set(game.get("participants") or [game.get("owner_id")])
         game.pop("finishing", None)
         game.pop("_digit_lock", None)
+        game.pop("rewarded", None)
         games[key] = game
         return game
     return None
@@ -874,6 +876,16 @@ def paper_embed(title: str, *, description: str | None = None) -> discord.Embed:
     return embed
 
 
+@dataclass(frozen=True)
+class WinOutcome:
+    """Result of awarding a win — discord.Embed cannot carry custom attrs (2.7+)."""
+
+    embed: discord.Embed
+    coins: int = 0
+    rank: int | None = None
+    quiet: bool = False
+
+
 def selected_cell(game: dict) -> tuple[int, int]:
     return game["sel_r"], game["sel_c"]
 
@@ -957,7 +969,7 @@ def finish_win(
     *,
     challenge_winner: bool = False,
     award: bool = True,
-) -> discord.Embed:
+) -> WinOutcome:
     gstats = guild_stats(data, guild_id)
     stats = user_stats(gstats, user.id)
     stats["name"] = getattr(user, "display_name", user.name)
@@ -966,12 +978,8 @@ def finish_win(
 
     if not award and is_daily:
         # Duplicate claim (Discord retry / double-tap after win already saved).
-        # Return a silent marker — never post a "already claimed" nag.
-        quiet = paper_embed(" ")
-        quiet._sudoku_coins = 0  # type: ignore[attr-defined]
-        quiet._sudoku_rank = None  # type: ignore[attr-defined]
-        quiet._sudoku_quiet = True  # type: ignore[attr-defined]
-        return quiet
+        # Quiet marker — never post an "already claimed" nag.
+        return WinOutcome(embed=paper_embed("Daily"), coins=0, quiet=True)
 
     stats["wins"] += 1
     stats["games"] += 1
@@ -1030,9 +1038,7 @@ def finish_win(
         embed.add_field(name="Rank", value=f"#{rank}", inline=True)
     else:
         embed.add_field(name="Mode", value=game["mode"].capitalize(), inline=True)
-    embed._sudoku_coins = coins  # type: ignore[attr-defined]
-    embed._sudoku_rank = rank  # type: ignore[attr-defined]
-    return embed
+    return WinOutcome(embed=embed, coins=coins, rank=rank, quiet=False)
 
 
 async def finish_win_and_announce(
@@ -1040,8 +1046,8 @@ async def finish_win_and_announce(
     guild_id: int,
     user: discord.abc.User,
     game: dict,
-) -> discord.Embed:
-    """Award win; for daily, gate rewards/announcement on first MongoDB claim."""
+) -> WinOutcome:
+    """Award win; for daily, gate rewards on first MongoDB claim (no channel spam)."""
     if game.get("mode") != "daily":
         return finish_win(bot.data, guild_id, user, game)
 
@@ -1068,15 +1074,14 @@ async def finish_win_and_announce(
     if not first:
         return finish_win(bot.data, guild_id, user, game, award=False)
 
-    embed = finish_win(bot.data, guild_id, user, game)
+    outcome = finish_win(bot.data, guild_id, user, game)
     share = build_daily_share_text(
         day=day,
         difficulty=game.get("difficulty"),
         elapsed=elapsed,
     )
-    embed.add_field(name="Share", value=f"```\n{share}\n```", inline=False)
-    # No channel announcement — players use `/dailyboard` if they want rankings.
-    return embed
+    outcome.embed.add_field(name="Share", value=f"```\n{share}\n```", inline=False)
+    return outcome
 
 
 def finish_forfeit(data: dict, guild_id: int, user: discord.abc.User, game: dict) -> discord.Embed:
@@ -1253,7 +1258,7 @@ async def settle_challenge_match(
             winner_user,
             winner_game,
             challenge_winner=True,
-        )
+        ).embed
         gstats_w = guild_stats(bot.data, guild_id)
         user_stats(gstats_w, winner_id)["challenge_wins"] = (
             int(user_stats(gstats_w, winner_id).get("challenge_wins", 0)) + 1
@@ -1331,6 +1336,10 @@ async def handle_challenge_completion(
             view=None,
             attachments=[],
         )
+        game.pop("finishing", None)
+        game.pop("_digit_lock", None)
+        view.stop()
+        await remove_game(view.game_key)
         return
 
     image = render_board(
@@ -1523,29 +1532,47 @@ class ChallengeInviteView(discord.ui.View):
         if self._launching or self.accepted_ids != self.invitee_ids or not self.invitee_ids:
             return
         self._launching = True
-        self._disable()
+        # Soft-disable while launching (don't stop() yet — abort must recover)
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+
+        async def _abort(msg: str) -> None:
+            self._launching = False
+            for child in self.children:
+                child.disabled = False  # type: ignore[attr-defined]
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except discord.HTTPException:
+                pass
+            if self.message:
+                try:
+                    await self.message.edit(
+                        content=self._status_text(msg),
+                        view=self,
+                    )
+                except discord.HTTPException:
+                    pass
 
         guild = interaction.guild
         if guild is None or not isinstance(interaction.channel, discord.TextChannel):
+            await _abort("Use this lobby in a server text channel.")
             return
 
         all_ids = [self.challenger_id, *sorted(self.accepted_ids)]
         for uid in all_ids:
             if find_challenge_game_for_user(uid):
-                await interaction.followup.send(
-                    "Someone already has an active challenge — cancelled.",
-                    ephemeral=True,
-                )
+                await _abort("Someone already has an active challenge — try again later.")
                 return
 
         members: list[discord.Member] = []
         for uid in all_ids:
             m = guild.get_member(uid)
             if m is None:
-                await interaction.followup.send("Could not resolve all players.", ephemeral=True)
+                await _abort("Could not resolve all players.")
                 return
             members.append(m)
 
+        self._disable()
         if self.message:
             await self.message.edit(
                 content=self._status_text("✅ Everyone accepted — starting!"),
@@ -1729,6 +1756,14 @@ class OpenChallengeLobbyView(discord.ui.View):
             await interaction.response.send_message("Only the challenger can start.", ephemeral=True)
             return
         if self._launching:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "Already starting…",
+                        ephemeral=True,
+                    )
+            except discord.HTTPException:
+                pass
             return
         if len(self.joined_ids) < 2:
             await interaction.response.send_message(
@@ -2334,17 +2369,40 @@ class SudokuView(discord.ui.View):
                 return
 
             if game.get("rewarded"):
+                # Award already done but UI may have failed — finish the panel once.
+                try:
+                    image = render_board(
+                        game["board"],
+                        game["given"],
+                        solution=game["solution"],
+                        conflicts=set(),
+                        difficulty=game.get("difficulty"),
+                    )
+                    file = board_to_file(image)
+                    key = self.game_key
+                    await remove_game(key)
+                    self.stop()
+                    await interaction.edit_original_response(
+                        content=f"{SPONGE} **Puzzle solved!**",
+                        embed=None,
+                        view=None,
+                        attachments=[file],
+                    )
+                except Exception:
+                    game["finishing"] = False
+                    game.pop("_digit_lock", None)
                 return
 
-            embed = await finish_win_and_announce(
+            outcome = await finish_win_and_announce(
                 self.bot,
                 guild_id,
                 interaction.user,
                 game,
             )
             game["rewarded"] = True
-            coins = int(getattr(embed, "_sudoku_coins", 0) or 0)
-            quiet = bool(getattr(embed, "_sudoku_quiet", False))
+            embed = outcome.embed
+            coins = int(outcome.coins)
+            quiet = bool(outcome.quiet)
             image = render_board(
                 game["board"],
                 game["given"],
@@ -2392,6 +2450,7 @@ class SudokuView(discord.ui.View):
             # Keep the correct digit on the board and recover the panel
             if self.game_key in games:
                 game["finishing"] = False
+                game.pop("_digit_lock", None)
                 try:
                     await self.refresh(interaction)
                 except Exception:
@@ -2581,7 +2640,11 @@ async def restore_persisted_sessions(bot: "SudokuBot") -> None:
             continue
         game = raw
         game["board"] = normalize_board(game.get("board") or [])
+        game["solution"] = normalize_solution(game.get("solution"))
         game["participants"] = set(game.get("participants") or [game.get("owner_id")])
+        game.pop("finishing", None)
+        game.pop("_digit_lock", None)
+        game.pop("rewarded", None)
         games[key] = game
 
         channel = bot.get_channel(game.get("channel_id"))
@@ -2720,7 +2783,20 @@ async def play_cmd(
         guild_id=guild_id,
         difficulty=diff_key,
     )
-    await start_panel(interaction, sk, games[sk])
+    try:
+        await start_panel(interaction, sk, games[sk])
+    except Exception:
+        await remove_game(sk)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Couldn't start the board. Try again.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "Couldn't start the board. Try again.",
+                ephemeral=True,
+            )
 
 
 @bot.tree.command(
@@ -2866,6 +2942,12 @@ async def daily_cmd(interaction: discord.Interaction):
         return
 
     guild_id, user_id = interaction.guild.id, interaction.user.id
+    if find_challenge_game_for_user(user_id):
+        await interaction.response.send_message(
+            "Finish your speedrun challenge first.",
+            ephemeral=True,
+        )
+        return
     sk = solo_key(guild_id, user_id)
     if sk in games:
         await interaction.response.send_message(
@@ -2969,7 +3051,11 @@ async def dailyboard_cmd(interaction: discord.Interaction):
             f"{prefix} **{name}** — {format_time(r.get('time', 0))}"
         )
 
-    failed = sum(1 for r in results.values() if not r.get("won"))
+    failed = sum(
+        1
+        for r in results.values()
+        if not r.get("won") and not r.get("in_progress")
+    )
     embed = paper_embed(f"Daily #{daily_puzzle_number(daily['date'])}")
     embed.add_field(name="Date", value=daily["date"], inline=True)
     embed.add_field(name="Solved", value=str(len(winners)), inline=True)
