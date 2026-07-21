@@ -51,7 +51,8 @@ MAX_CHALLENGE_PLAYERS = 5  # challenger + up to 4 opponents
 CHALLENGE_LOSER_COINS = 25
 CHALLENGE_COOLDOWN_SEC = 60
 INVITE_TIMEOUT_SEC = 5 * 60
-DAILY_EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc).date()
+# Optional: set to your server ID for instant slash-command updates (global sync can lag).
+DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0") or 0)
 
 # Fixed weekly difficulty for /daily (Monday=0 … Sunday=6)
 DAILY_WEEKDAY_DIFFICULTY = {
@@ -2663,8 +2664,15 @@ class SudokuBot(commands.Bot):
         await match_store.connect()
         kind = type(match_store).__name__
         print(f"Challenge match store: {kind}")
+
+        # Global sync can take minutes; guild sync is instant for that server.
+        if DISCORD_GUILD_ID:
+            guild = discord.Object(id=DISCORD_GUILD_ID)
+            self.tree.copy_global_to(guild=guild)
+            guild_synced = await self.tree.sync(guild=guild)
+            print(f"Synced {len(guild_synced)} slash command(s) to guild {DISCORD_GUILD_ID}.")
         synced = await self.tree.sync()
-        print(f"Synced {len(synced)} slash command(s).")
+        print(f"Synced {len(synced)} global slash command(s).")
 
 
 bot = SudokuBot()

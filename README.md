@@ -61,6 +61,7 @@ UptimeRobot will ping the health URL so Render is less likely to sleep.
 | Variable | Required | Description |
 |---|---|---|
 | `DISCORD_TOKEN` | yes | Bot token |
+| `DISCORD_GUILD_ID` | no | Server ID for instant slash sync (`0` = global only; global can lag a few minutes) |
 | `MONGODB_URI` | no | Atlas/local URI (in-memory fallback if unset) |
 | `MONGODB_DB` | no | Database name (default `sudoku`) |
 | `PORT` | no | HTTP port (Render sets this automatically) |
