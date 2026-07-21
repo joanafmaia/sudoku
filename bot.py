@@ -236,6 +236,30 @@ async def remove_game(key: tuple) -> dict | None:
     return game
 
 
+async def close_solved_session(
+    bot: "SudokuBot",
+    key: tuple,
+    game: dict,
+    user: discord.abc.User,
+    guild_id: int | None,
+) -> int:
+    """If the board is already solved, award (once) and clear the session. Returns sponges awarded."""
+    coins = 0
+    if game.get("mode") == "challenge":
+        await remove_game(key)
+        return 0
+    if is_solved(game.get("board") or [], game.get("solution")):
+        if not game.get("rewarded") and guild_id is not None:
+            try:
+                outcome = await finish_win_and_announce(bot, guild_id, user, game)
+                coins = int(outcome.coins)
+                game["rewarded"] = True
+            except Exception as exc:  # noqa: BLE001
+                print(f"close_solved_session award failed: {exc}")
+    await remove_game(key)
+    return coins
+
+
 async def load_persisted_game(key: tuple) -> dict | None:
     """Return an in-memory game, restoring from Mongo/memory store if needed."""
     if key in games:
@@ -2871,11 +2895,17 @@ async def play_cmd(
         return
     sk = solo_key(guild_id, user_id)
     if sk in games:
-        await interaction.response.send_message(
-            f"You already have a **{games[sk]['mode']}** game. Use **Quit** or `/quit`.",
-            ephemeral=True,
-        )
-        return
+        existing = games[sk]
+        if is_solved(existing.get("board") or [], existing.get("solution")):
+            coins = await close_solved_session(bot, sk, existing, interaction.user, guild_id)
+            # Fall through and start a fresh game
+            _ = coins
+        else:
+            await interaction.response.send_message(
+                f"You already have a **{existing['mode']}** game. Use **Quit** or `/quit`.",
+                ephemeral=True,
+            )
+            return
 
     diff_key = difficulty.value if difficulty else DEFAULT_DIFFICULTY
     board, given, solution = make_puzzle(diff_key)
@@ -3056,11 +3086,16 @@ async def daily_cmd(interaction: discord.Interaction):
         return
     sk = solo_key(guild_id, user_id)
     if sk in games:
-        await interaction.response.send_message(
-            f"Finish your **{games[sk]['mode']}** game first (**Quit** / `/quit`).",
-            ephemeral=True,
-        )
-        return
+        existing = games[sk]
+        if is_solved(existing.get("board") or [], existing.get("solution")):
+            await close_solved_session(bot, sk, existing, interaction.user, guild_id)
+            # Fall through — allow a new daily only if today's slot is free
+        else:
+            await interaction.response.send_message(
+                f"Finish your **{existing['mode']}** game first (**Quit** / `/quit`).",
+                ephemeral=True,
+            )
+            return
 
     daily = get_guild_daily(bot.data, guild_id)
     if str(user_id) in daily["results"]:
@@ -3212,6 +3247,16 @@ async def quit_cmd(interaction: discord.Interaction):
     sk = solo_key(guild_id, interaction.user.id)
     if sk in games:
         game = games[sk]
+        # Already solved but win UI failed earlier — close + award, don't forfeit
+        if is_solved(game.get("board") or [], game.get("solution")):
+            await interaction.response.defer(ephemeral=True)
+            coins = await close_solved_session(bot, sk, game, interaction.user, guild_id)
+            msg = (
+                f"{SPONGE} That board was already solved — session closed."
+                + (f" Rewards: **{format_sponges(coins, signed=True)}** (see `/stats`)." if coins else "")
+            )
+            await interaction.followup.send(msg, ephemeral=True)
+            return
         if game.get("mode") == "daily":
             prompt = "Quit today's daily? This locks your attempt and resets your streak."
         else:
@@ -3219,6 +3264,19 @@ async def quit_cmd(interaction: discord.Interaction):
         await interaction.response.send_message(
             prompt,
             view=ConfirmQuitView(sk, bot, None),
+            ephemeral=True,
+        )
+        return
+
+    # Orphan daily lock (no live session) — clear so they aren't stuck
+    daily = get_guild_daily(bot.data, guild_id)
+    entry = daily.get("results", {}).get(str(interaction.user.id))
+    if entry and entry.get("in_progress") and not entry.get("won"):
+        daily["results"].pop(str(interaction.user.id), None)
+        save_data(bot.data)
+        await drop_persisted_game(sk)
+        await interaction.response.send_message(
+            f"{BUBBLE} Cleared a stuck daily lock. You can try `/daily` or `/play` again.",
             ephemeral=True,
         )
         return
