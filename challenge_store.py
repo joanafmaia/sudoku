@@ -61,6 +61,10 @@ class MatchStore:
         """Atomically claim today's daily win. True = first claim (award + announce)."""
         raise NotImplementedError
 
+    async def has_daily_claim(self, guild_id: int, user_id: int, day: str) -> bool:
+        """True if this user already claimed today's daily win in durable storage."""
+        return False
+
     async def count_daily_wins(self, guild_id: int, day: str) -> int:
         raise NotImplementedError
 
@@ -158,6 +162,9 @@ class MemoryMatchStore(MatchStore):
             "claimed_at": time.time(),
         }
         return True
+
+    async def has_daily_claim(self, guild_id: int, user_id: int, day: str) -> bool:
+        return self._daily_key(guild_id, user_id, day) in self._daily
 
     async def count_daily_wins(self, guild_id: int, day: str) -> int:
         return sum(
@@ -277,6 +284,14 @@ class MongoMatchStore(MatchStore):
             return True
         except DuplicateKeyError:
             return False
+
+    async def has_daily_claim(self, guild_id: int, user_id: int, day: str) -> bool:
+        if self._daily is None:
+            await self.connect()
+        if self._daily is None:
+            return False
+        doc = await self._daily.find_one({"_id": f"{guild_id}:{day}:{user_id}"})
+        return doc is not None
 
     async def count_daily_wins(self, guild_id: int, day: str) -> int:
         return await self._daily.count_documents({"guild_id": guild_id, "date": day})

@@ -4258,8 +4258,18 @@ async def daily_cmd(interaction: discord.Interaction):
             return
 
     daily = get_guild_daily(bot.data, guild_id)
-    if str(user_id) in daily["results"]:
-        r = daily["results"][str(user_id)]
+    day = daily["date"]
+    uid = str(user_id)
+
+    async def _deny_already_done(detail: str) -> None:
+        await reply_ephemeral(
+            interaction,
+            f"{PINEAPPLE} You've already **{detail}** today's daily (`{day}`).\n"
+            f"Only **one** pineapple puzzle per day — play more with `/play`.",
+        )
+
+    if uid in daily["results"]:
+        r = daily["results"][uid]
         if r.get("in_progress"):
             restored = await load_persisted_game(sk)
             if restored and restored.get("mode") == "daily":
@@ -4270,7 +4280,7 @@ async def daily_cmd(interaction: discord.Interaction):
                 )
                 return
             # Orphan lock (restart without recoverable session) — unlock and continue
-            daily["results"].pop(str(user_id), None)
+            daily["results"].pop(uid, None)
             save_data(bot.data)
         else:
             if r.get("won"):
@@ -4278,17 +4288,25 @@ async def daily_cmd(interaction: discord.Interaction):
             elif r.get("forfeit"):
                 detail = "used (quit)"
             else:
-                detail = "already used"
-            await reply_ephemeral(
-                interaction,
-                f"You've already **{detail}** today's daily ({daily['date']}). "
-                f"Only **one** daily attempt per day — play more with `/play`, or check "
-                f"`/leaderboard` → Today's daily.",
-            )
+                detail = "used"
+            await _deny_already_done(detail)
             return
 
+    # Durable Mongo claim (survives local wipe / redeploy)
+    try:
+        if await match_store.has_daily_claim(guild_id, user_id, day):
+            daily["results"][uid] = {
+                "won": True,
+                "name": interaction.user.display_name,
+            }
+            save_data(bot.data)
+            await _deny_already_done("cleared")
+            return
+    except Exception as exc:  # noqa: BLE001
+        print(f"has_daily_claim failed: {exc}")
+
     # Lock the attempt immediately so a restart can't grant a second daily
-    daily["results"][str(user_id)] = {
+    daily["results"][uid] = {
         "won": False,
         "in_progress": True,
         "name": interaction.user.display_name,
