@@ -1138,6 +1138,7 @@ def finish_win(
             "won": True,
             "time": int(elapsed),
             "name": stats["name"],
+            "coins": coins,
         }
 
     save_data(data)
@@ -1182,7 +1183,7 @@ async def finish_win_and_announce(
     user: discord.abc.User,
     game: dict,
 ) -> WinOutcome:
-    """Award win; for daily, gate rewards on first claim (Mongo or local)."""
+    """Award win; for daily, gate on local `won` first (Mongo is best-effort anti-dupe)."""
     if game.get("mode") != "daily":
         return finish_win(bot.data, guild_id, user, game)
 
@@ -1192,21 +1193,26 @@ async def finish_win_and_announce(
     gstats = guild_stats(bot.data, guild_id)
     stats = user_stats(gstats, user.id)
 
-    # Local gate — already cleared today
     daily_meta = get_guild_daily(bot.data, guild_id)
     prior = daily_meta.get("results", {}).get(str(user.id)) or {}
+
+    # Already awarded locally today — don't pay twice; still show previous sponge amount
     if prior.get("won"):
-        return finish_win(bot.data, guild_id, user, game, award=False)
+        prior_coins = int(prior.get("coins") or 0)
+        quiet = finish_win(bot.data, guild_id, user, game, award=False)
+        return WinOutcome(
+            embed=quiet.embed,
+            coins=prior_coins,
+            rank=quiet.rank,
+            quiet=True,
+        )
 
-    preview_coins = win_reward(
-        stats["streak"] + 1,
-        daily=True,
-        difficulty=game.get("difficulty"),
-    )
+    # Award sponges FIRST — never let a Mongo "already claimed" block a first local payout
+    outcome = finish_win(bot.data, guild_id, user, game)
 
-    first = True
+    preview_coins = int(outcome.coins)
     try:
-        first = await match_store.try_claim_daily_win(
+        await match_store.try_claim_daily_win(
             guild_id=guild_id,
             user_id=user.id,
             day=day,
@@ -1215,14 +1221,9 @@ async def finish_win_and_announce(
             difficulty=tier,
             coins=preview_coins,
         )
-    except Exception as exc:  # noqa: BLE001 — don't block rewards if Mongo is down
-        print(f"try_claim_daily_win failed (awarding via local data): {exc}")
-        first = True
+    except Exception as exc:  # noqa: BLE001
+        print(f"try_claim_daily_win failed (local award kept): {exc}")
 
-    if not first:
-        return finish_win(bot.data, guild_id, user, game, award=False)
-
-    outcome = finish_win(bot.data, guild_id, user, game)
     share = build_daily_share_text(
         day=day,
         difficulty=game.get("difficulty"),
@@ -2550,7 +2551,7 @@ class SudokuView(discord.ui.View):
             else:
                 coins = 0
 
-            # 2) Update THIS message only: solved board + congratulations strip (no embed / no channel spam)
+            # 2) Update THIS message only: solved board + congratulations strip
             file = board_to_file(
                 render_board(
                     game["board"],
@@ -2558,7 +2559,7 @@ class SudokuView(discord.ui.View):
                     solution=game.get("solution"),
                     conflicts=set(),
                     difficulty=game.get("difficulty"),
-                    reward_sponges=coins if coins else 0,
+                    reward_sponges=max(int(coins), 0),
                 )
             )
             try:
