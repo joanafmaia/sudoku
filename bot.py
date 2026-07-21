@@ -90,14 +90,13 @@ RGB_PENCIL = "#64748B"            # soft graphite notes
 RGB_HEADER = "#0F766E"            # lagoon header
 RGB_OUTLINE = "#F59E0B"           # gold selection ring
 
-# Fixed Discord attachment canvas — width matches the button row in chat
-# (Discord stretches both the image and action rows to the same message width).
-BOARD_CANVAS = 540
-BOARD_HEADER_H = 36
+# Fixed Discord attachment canvas — larger = bigger chat preview (full-bleed with keypad)
+BOARD_CANVAS = 800
+BOARD_HEADER_H = 42
 BOARD_CARD_PAD = 0          # full-bleed so the board aligns with the keyboard
 BOARD_CARD_RADIUS = 0
-BOARD_INNER_PAD = 10
-BOARD_REWARD_H = 58
+BOARD_INNER_PAD = 12
+BOARD_REWARD_H = 64
 
 COLS = "ABCDEFGHI"
 FONTS_DIR = Path(__file__).with_name("fonts")
