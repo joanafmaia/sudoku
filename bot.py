@@ -1154,12 +1154,17 @@ def paste_owned_emoji_pins(
 
     rng = random.Random(int(pin_seed or 1))
     rng.shuffle(slots)
-    # Up to one pin per owned emoji, plus a few repeats if they own several
-    count = min(len(slots), max(len(emojis), min(8, len(emojis) * 2)))
-    chosen_slots = slots[:count]
+    # One pin per owned emoji — no duplicates (buying more cosmetics = more unique pins)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for e in emojis:
+        if e not in seen:
+            unique.append(e)
+            seen.add(e)
+    chosen_slots = slots[: min(len(slots), len(unique))]
     base = img.convert("RGBA")
     for i, (x, y) in enumerate(chosen_slots):
-        emoji = emojis[i % len(emojis)]
+        emoji = unique[i]
         pin = load_emoji_pin(emoji, pin_size)
         if pin is None:
             continue
