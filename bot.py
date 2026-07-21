@@ -291,7 +291,7 @@ async def restore_leaderboard_from_mongo(bot: "SudokuBot") -> None:
             except OSError as exc:
                 print(f"write xp-migrated leaderboard failed: {exc}")
             await match_store.save_leaderboard(bot.data)
-            print(f"Migrated career XP / shop spend for {touched} player(s) → Mongo.")
+            print(f"Migrated career XP / shop spend / price-cut refunds for {touched} player(s) → Mongo.")
     except Exception as exc:  # noqa: BLE001
         print(f"xp migration failed: {exc}")
 
@@ -378,6 +378,26 @@ def catalog_spend_total(stats: dict) -> int:
     return total
 
 
+def refund_shop_price_cuts(stats: dict) -> bool:
+    """One-time pocket credit when owned cosmetics got cheaper (or became free).
+
+    Only refunds the gap between recorded sponges_spent and today's catalog value,
+    so players who only received free auto-grants (spent 0) get nothing.
+    Returns True if stats were touched (flag and/or coins).
+    """
+    if stats.get("_price_cut_refund_v1") == 1:
+        return False
+    stats.setdefault("sponges_spent", 0)
+    approx_now = catalog_spend_total(stats)
+    spent = int(stats.get("sponges_spent") or 0)
+    credit = max(0, spent - approx_now)
+    if credit:
+        stats["coins"] = int(stats.get("coins") or 0) + credit
+        stats["sponges_spent"] = approx_now
+    stats["_price_cut_refund_v1"] = 1
+    return True
+
+
 def seed_sponges_spent(stats: dict) -> bool:
     """Backfill sponges_spent from owned cosmetics (pre-counter purchases)."""
     stats.setdefault("sponges_spent", 0)
@@ -431,6 +451,8 @@ def migrate_leaderboard_xp(data: dict) -> int:
                 stats["owned_pins"] = merged
                 stats["owned_themes"] = merged
             if seed_sponges_spent(stats):
+                changed = True
+            if refund_shop_price_cuts(stats):
                 changed = True
             if changed:
                 touched += 1
@@ -3173,15 +3195,6 @@ class SudokuView(discord.ui.View):
                 game["ui_stage"] = STAGE_NUMBER
                 game["_digit_lock"] = False
                 await self.refresh(interaction)
-                # Only nag when the board is full AND still has conflicts
-                if full and conflicts:
-                    try:
-                        await interaction.followup.send(
-                            f"{BUBBLE} Board is full but has conflicts — fix the red cells.",
-                            ephemeral=True,
-                        )
-                    except discord.HTTPException:
-                        pass
                 return
 
             # Clean placement — return to cell picker for the next empty cell
