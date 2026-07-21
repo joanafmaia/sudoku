@@ -127,7 +127,9 @@ COLS = "ABCDEFGHI"
 FONTS_DIR = Path(__file__).with_name("fonts")
 
 # SpongeBob SquarePants economy (stored as "coins" in data)
+# XP = permanent career score (leaderboard); sponges = spendable shop currency
 SPONGE = "🧽"
+XP = "⭐"
 BUBBLE = "🫧"
 STAR = "⭐"
 PINEAPPLE = "🍍"
@@ -142,6 +144,13 @@ def format_sponges(amount: int, *, signed: bool = False) -> str:
         return f"+{n} {SPONGE}" if n >= 0 else f"{n} {SPONGE}"
     return f"{n} {SPONGE}"
 
+
+def format_xp(amount: int, *, signed: bool = False) -> str:
+    """Display career XP (never spent)."""
+    n = int(amount)
+    if signed:
+        return f"+{n} XP" if n >= 0 else f"{n} XP"
+    return f"{n} XP"
 
 WIN_TAUNTS = (
     f"{BUBBLE} I'm ready! I'm ready! Bikini Bottom is proud of you!",
@@ -271,6 +280,20 @@ async def restore_leaderboard_from_mongo(bot: "SudokuBot") -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"seed leaderboard failed: {exc}")
 
+    # Career XP backfill (wins/daily/challenge → xp); shop spend never reduces XP
+    try:
+        touched = migrate_leaderboard_xp(bot.data)
+        if touched:
+            try:
+                with DATA_FILE.open("w", encoding="utf-8") as f:
+                    json.dump(bot.data, f, indent=2)
+            except OSError as exc:
+                print(f"write xp-migrated leaderboard failed: {exc}")
+            await match_store.save_leaderboard(bot.data)
+            print(f"Migrated career XP for {touched} player(s) → Mongo.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"xp migration failed: {exc}")
+
     # If a redeploy wiped stats but daily claims remain, rebuild the bare minimum
     try:
         claims = await match_store.list_daily_completions()
@@ -340,6 +363,42 @@ async def restore_leaderboard_from_mongo(bot: "SudokuBot") -> None:
         save_data(bot.data)
 
 
+def seed_career_xp(stats: dict) -> bool:
+    """Backfill career XP from recorded wins (shop spend never reduces XP).
+
+    Returns True if stats were changed.
+    """
+    stats.setdefault("xp", 0)
+    # Bump version when the backfill formula changes so veterans get a refresh
+    if stats.get("_xp_migrated") == 2:
+        return False
+    wins = int(stats.get("wins") or 0)
+    daily = int(stats.get("daily_wins") or 0)
+    chall = int(stats.get("challenge_wins") or 0)
+    approx = (
+        wins * BASE_WIN_REWARD
+        + daily * DAILY_BONUS
+        + chall * int(round(BASE_WIN_REWARD * (CHALLENGE_WIN_MULT - 1)))
+    )
+    stats["xp"] = max(int(stats.get("xp") or 0), approx)
+    stats["_xp_migrated"] = 2
+    return True
+
+
+def migrate_leaderboard_xp(data: dict) -> int:
+    """Seed XP for every player blob in the leaderboard payload. Returns players touched."""
+    touched = 0
+    for guild_key, gstats in list(data.items()):
+        if not isinstance(gstats, dict) or guild_key.startswith("_"):
+            continue
+        for user_key, stats in list(gstats.items()):
+            if not isinstance(stats, dict) or user_key.startswith("_") or not str(user_key).isdigit():
+                continue
+            if seed_career_xp(stats):
+                touched += 1
+    return touched
+
+
 def guild_stats(data: dict, guild_id: int) -> dict:
     key = str(guild_id)
     if key not in data:
@@ -353,6 +412,7 @@ def user_stats(gstats: dict, user_id: int) -> dict:
         gstats[key] = {}
     s = gstats[key]
     s.setdefault("coins", 0)
+    seed_career_xp(s)
     s.setdefault("wins", 0)
     s.setdefault("losses", 0)
     s.setdefault("games", 0)
@@ -1277,10 +1337,14 @@ WIN_BANNER_LINES = (
 )
 
 
-def win_reward_caption(coins: int) -> str:
-    """Readable win line under the board image (not painted into the PNG)."""
+def win_reward_caption(coins: int, xp: int | None = None) -> str:
+    """Readable win line under the board image (XP + sponges)."""
     line = random.choice(WIN_BANNER_LINES)
-    return f"{BUBBLE} **{line} {format_sponges(max(int(coins), 0), signed=True)}!**"
+    gained_xp = int(coins if xp is None else xp)
+    return (
+        f"{BUBBLE} **{line} {format_xp(gained_xp, signed=True)} · "
+        f"{format_sponges(max(int(coins), 0), signed=True)}!**"
+    )
 
 
 def board_to_file(image: BytesIO) -> discord.File:
@@ -1408,6 +1472,7 @@ class WinOutcome:
 
     embed: discord.Embed
     coins: int = 0
+    xp: int = 0
     rank: int | None = None
     quiet: bool = False
 
@@ -1508,7 +1573,7 @@ def finish_win(
     if not award and is_daily:
         # Duplicate claim (Discord retry / double-tap after win already saved).
         # Quiet marker — never post an "already claimed" nag.
-        return WinOutcome(embed=paper_embed("Daily"), coins=0, quiet=True)
+        return WinOutcome(embed=paper_embed("Daily"), coins=0, xp=0, quiet=True)
 
     stats["wins"] += 1
     stats["games"] += 1
@@ -1523,7 +1588,9 @@ def finish_win(
         difficulty=game.get("difficulty"),
         challenge_winner=challenge_winner,
     )
+    xp = coins  # career XP mirrors sponge grant; shop spend never reduces XP
     stats["coins"] += coins
+    stats["xp"] = int(stats.get("xp") or 0) + xp
 
     if is_daily:
         stats["daily_wins"] += 1
@@ -1533,6 +1600,7 @@ def finish_win(
             "time": int(elapsed),
             "name": stats["name"],
             "coins": coins,
+            "xp": xp,
         }
 
     save_data(data)
@@ -1561,14 +1629,16 @@ def finish_win(
     embed.description = random.choice(WIN_TAUNTS)
     embed.add_field(name="Time", value=format_time(elapsed), inline=True)
     embed.add_field(name="Difficulty", value=difficulty_label(game.get("difficulty")), inline=True)
-    embed.add_field(name=f"Reward {SPONGE}", value=format_sponges(coins, signed=True), inline=True)
+    embed.add_field(name=f"XP {XP}", value=format_xp(xp, signed=True), inline=True)
+    embed.add_field(name=f"Sponges {SPONGE}", value=format_sponges(coins, signed=True), inline=True)
     embed.add_field(name=f"Streak {STAR}", value=str(stats["streak"]), inline=True)
+    embed.add_field(name=f"Career XP {XP}", value=format_xp(stats["xp"]), inline=True)
     embed.add_field(name=f"Pocket {SPONGE}", value=format_sponges(stats["coins"]), inline=True)
     if rank is not None:
         embed.add_field(name="Rank", value=f"#{rank}", inline=True)
     else:
         embed.add_field(name="Mode", value=game["mode"].capitalize(), inline=True)
-    return WinOutcome(embed=embed, coins=coins, rank=rank, quiet=False)
+    return WinOutcome(embed=embed, coins=coins, xp=xp, rank=rank, quiet=False)
 
 
 async def finish_win_and_announce(
@@ -1590,21 +1660,24 @@ async def finish_win_and_announce(
     daily_meta = get_guild_daily(bot.data, guild_id)
     prior = daily_meta.get("results", {}).get(str(user.id)) or {}
 
-    # Already awarded locally today — don't pay twice; still show previous sponge amount
+    # Already awarded locally today — don't pay twice; still show previous amounts
     if prior.get("won"):
         prior_coins = int(prior.get("coins") or 0)
+        prior_xp = int(prior.get("xp") or prior_coins)
         quiet = finish_win(bot.data, guild_id, user, game, award=False)
         return WinOutcome(
             embed=quiet.embed,
             coins=prior_coins,
+            xp=prior_xp,
             rank=quiet.rank,
             quiet=True,
         )
 
-    # Award sponges FIRST — never let a Mongo "already claimed" block a first local payout
+    # Award XP + sponges FIRST — never let a Mongo "already claimed" block a first local payout
     outcome = finish_win(bot.data, guild_id, user, game)
 
     preview_coins = int(outcome.coins)
+    preview_xp = int(outcome.xp)
     try:
         await match_store.try_claim_daily_win(
             guild_id=guild_id,
@@ -2959,7 +3032,7 @@ class SudokuView(discord.ui.View):
                     pass
                 return
 
-            # 1) Award sponges first
+            # 1) Award XP + sponges first
             if not game.get("rewarded"):
                 outcome = await finish_win_and_announce(
                     self.bot,
@@ -2969,8 +3042,10 @@ class SudokuView(discord.ui.View):
                 )
                 game["rewarded"] = True
                 coins = int(outcome.coins)
+                xp = int(outcome.xp)
             else:
                 coins = 0
+                xp = 0
 
             # 2) Same message: solved board image + reward as readable text underneath
             file = board_to_file(
@@ -2985,7 +3060,11 @@ class SudokuView(discord.ui.View):
                     pin_seed=game.get("pin_seed"),
                 )
             )
-            caption = win_reward_caption(coins) if coins > 0 else f"{BUBBLE} **Board complete!**"
+            caption = (
+                win_reward_caption(coins, xp)
+                if coins > 0 or xp > 0
+                else f"{BUBBLE} **Board complete!**"
+            )
             try:
                 await interaction.edit_original_response(
                     content=caption,
@@ -3763,13 +3842,16 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name=f"{SPONGE} Sponges",
+        name=f"{XP} XP & {SPONGE} Sponges",
         value=(
-            f"Solve **{format_sponges(BASE_WIN_REWARD, signed=True)}** · "
-            f"Daily **{format_sponges(DAILY_BONUS, signed=True)}** · "
-            f"Streak **{format_sponges(STREAK_BONUS_PER, signed=True)}**/lvl · "
+            f"**XP** ranks the leaderboard (never spent).\n"
+            f"**Sponges** buy titles & pins in `/shop`.\n"
+            f"Solve **{format_xp(BASE_WIN_REWARD, signed=True)}** + "
+            f"**{format_sponges(BASE_WIN_REWARD, signed=True)}** · "
+            f"Daily **+{DAILY_BONUS}** each · "
+            f"Streak **+{STREAK_BONUS_PER}**/lvl · "
             f"Challenge win **×{CHALLENGE_WIN_MULT:g}** · "
-            f"loss **{format_sponges(CHALLENGE_LOSER_COINS, signed=True)}**\n"
+            f"loss **{format_sponges(CHALLENGE_LOSER_COINS, signed=True)}** (sponges only)\n"
             f"{tiers}"
         ),
         inline=False,
@@ -4209,11 +4291,12 @@ async def quit_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("No game to quit.", ephemeral=True)
 
 
-@bot.tree.command(name="leaderboard", description="Bikini Bottom rankings — sponges, times, daily, challenge")
+@bot.tree.command(name="leaderboard", description="Bikini Bottom rankings — XP, times, daily, challenge")
 @app_commands.describe(board="Which leaderboard to show")
 @app_commands.choices(
     board=[
-        app_commands.Choice(name="Sponges", value="coins"),
+        app_commands.Choice(name="XP (career)", value="xp"),
+        app_commands.Choice(name="Sponges (pocket)", value="coins"),
         app_commands.Choice(name="Best time", value="time"),
         app_commands.Choice(name="Daily wins", value="daily"),
         app_commands.Choice(name="Challenge wins", value="challenge"),
@@ -4226,14 +4309,20 @@ async def leaderboard_cmd(
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
         return
-    mode = board.value if board else "coins"
+    mode = board.value if board else "xp"
     gstats = guild_stats(bot.data, interaction.guild.id)
     players = [(uid, user_stats(gstats, int(uid))) for uid, _ in iter_players(gstats)]
 
-    if mode == "coins":
+    if mode == "xp":
+        ranked = sorted(players, key=lambda item: item[1].get("xp", 0), reverse=True)[:10]
+        title = f"{XP} Career XP"
+        blurb = "Who's climbing the ladder? (Shop spend doesn't hurt you here.)"
+        fmt = lambda s: f"**{format_xp(s.get('xp', 0))}** · {s.get('wins', 0)}W"
+        nonempty = lambda s: s.get("xp", 0) > 0 or s.get("wins", 0) > 0
+    elif mode == "coins":
         ranked = sorted(players, key=lambda item: item[1].get("coins", 0), reverse=True)[:10]
         title = f"{SPONGE} Richest pockets"
-        blurb = "Who's swimming in sponges?"
+        blurb = "Spendable sponges left after shopping."
         fmt = lambda s: f"**{format_sponges(s.get('coins', 0))}** · {s.get('wins', 0)}W/{s.get('losses', 0)}L"
         nonempty = lambda s: s.get("coins", 0) > 0 or s.get("wins", 0) > 0
     elif mode == "time":
@@ -4261,7 +4350,7 @@ async def leaderboard_cmd(
     ranked = [(uid, s) for uid, s in ranked if nonempty(s)]
     if not ranked:
         await interaction.response.send_message(
-            f"{BUBBLE} Nobody on this board yet — go earn some sponges with `/play`!",
+            f"{BUBBLE} Nobody on this board yet — go earn some XP with `/play`!",
             ephemeral=True,
         )
         return
@@ -4307,6 +4396,7 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
     except Exception:
         pass
 
+    embed.add_field(name=f"Career XP {XP}", value=f"**{format_xp(s.get('xp', 0))}**", inline=True)
     embed.add_field(name=f"Pocket {SPONGE}", value=f"**{format_sponges(s['coins'])}**", inline=True)
     embed.add_field(name=f"Streak {STAR}", value=f"**{streak}** (best {best_streak})", inline=True)
     embed.add_field(name="Win rate", value=f"**{win_rate}**", inline=True)
