@@ -96,7 +96,7 @@ BOARD_HEADER_H = 36
 BOARD_CARD_PAD = 0          # full-bleed so the board aligns with the keyboard
 BOARD_CARD_RADIUS = 0
 BOARD_INNER_PAD = 10
-BOARD_REWARD_H = 56
+BOARD_REWARD_H = 52
 
 COLS = "ABCDEFGHI"
 FONTS_DIR = Path(__file__).with_name("fonts")
@@ -815,32 +815,65 @@ def _draw_reward_banner(
     reward_h: int,
     sponges: int,
 ) -> None:
-    """Full-width footer under the board: Aye aye! +N sponges."""
+    """Footer under the solved board — same style as the reference win strip."""
     y0 = canvas
-    draw.rectangle((0, y0, canvas, canvas + reward_h), fill="#FFE566")
-    draw.line((0, y0, canvas, y0), fill="#F59E0B", width=3)
+    y1 = canvas + reward_h
+    # Dark strip matching the solved-board chrome
+    draw.rectangle((0, y0, canvas, y1), fill="#2A2A2A")
+    draw.line((12, y0, canvas - 12, y0), fill="#1A1A1A", width=2)
 
-    font = board_font(20, bold=True)
-    line = f"Aye aye!  +{sponges}  sponges"
-    bb = draw.textbbox((0, 0), line, font=font)
-    tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    chip = 22
-    x = (canvas - tw - chip - 12) / 2
-    y = y0 + (reward_h - th) / 2 - 1
-    draw.text((x, y), line, fill="#0F766E", font=font)
-
-    chip_x = x + tw + 10
-    chip_y = y0 + (reward_h - chip) / 2
+    pad_x = 16
+    # Green check badge
+    badge = 26
+    bx = pad_x
+    by = y0 + (reward_h - badge) / 2
     draw.rounded_rectangle(
-        (chip_x, chip_y, chip_x + chip, chip_y + chip),
+        (bx, by, bx + badge, by + badge),
         radius=6,
+        fill="#22C55E",
+    )
+    check_font = board_font(18, bold=True)
+    mark = "✓"
+    cb = draw.textbbox((0, 0), mark, font=check_font)
+    cw, ch = cb[2] - cb[0], cb[3] - cb[1]
+    draw.text(
+        (bx + (badge - cw) / 2, by + (badge - ch) / 2 - 1),
+        mark,
+        fill="#FFFFFF",
+        font=check_font,
+    )
+
+    font = board_font(18, bold=False)
+    label = "Congratulations, you gained"
+    lb = draw.textbbox((0, 0), label, font=font)
+    lh = lb[3] - lb[1]
+    tx = bx + badge + 10
+    ty = y0 + (reward_h - lh) / 2 - 1
+    draw.text((tx, ty), label, fill="#F5F5F5", font=font)
+    tw = lb[2] - lb[0]
+
+    # Amount + yellow sponge cube
+    amount = str(int(sponges))
+    num_font = board_font(18, bold=True)
+    nb = draw.textbbox((0, 0), amount, font=num_font)
+    nw, nh = nb[2] - nb[0], nb[3] - nb[1]
+    ax = tx + tw + 12
+    ay = y0 + (reward_h - nh) / 2 - 1
+    draw.text((ax, ay), amount, fill="#FFFFFF", font=num_font)
+
+    chip = 22
+    cx = ax + nw + 8
+    cy = y0 + (reward_h - chip) / 2
+    draw.rounded_rectangle(
+        (cx, cy, cx + chip, cy + chip),
+        radius=5,
         fill="#F5D76E",
         outline="#C4A035",
         width=2,
     )
-    for dx, dy in ((6, 7), (14, 10), (9, 16)):
+    for dx, dy in ((5, 6), (13, 9), (8, 15)):
         draw.ellipse(
-            (chip_x + dx, chip_y + dy, chip_x + dx + 4, chip_y + dy + 4),
+            (cx + dx, cy + dy, cx + dx + 4, cy + dy + 4),
             fill="#E8C84A",
         )
 
@@ -2437,29 +2470,39 @@ class SudokuView(discord.ui.View):
                 g["_digit_lock"] = False
 
     async def _celebrate_win(self, interaction: discord.Interaction, game: dict) -> None:
-        """Award sponges and replace the live board with the completed panel + rewards."""
+        """Award sponges and update the same board message — no new channel posts."""
         game["finishing"] = True
+        key = self.game_key
         guild_id = None
         if interaction.guild is not None:
             guild_id = interaction.guild.id
         elif game.get("guild_id") is not None:
             guild_id = int(game["guild_id"])
 
+        coins = 0
         try:
             if game.get("mode") == "challenge":
                 await handle_challenge_completion(self.bot, interaction, game, self)
                 return
 
             if guild_id is None:
-                await interaction.followup.send(
-                    "Couldn't award rewards (missing server). Board is complete — use `/quit` if stuck.",
-                    ephemeral=True,
-                )
-                game["finishing"] = False
-                await self.refresh(interaction)
+                # Still close the session so /play is not blocked
+                await remove_game(key)
+                self.stop()
+                try:
+                    await interaction.edit_original_response(view=None)
+                except discord.HTTPException:
+                    pass
+                try:
+                    await interaction.followup.send(
+                        "Board complete, but couldn't award (missing server).",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException:
+                    pass
                 return
 
-            # --- 1) Award first (so a UI failure never loses sponges) ---
+            # 1) Award sponges first
             if not game.get("rewarded"):
                 outcome = await finish_win_and_announce(
                     self.bot,
@@ -2468,146 +2511,53 @@ class SudokuView(discord.ui.View):
                     game,
                 )
                 game["rewarded"] = True
+                coins = int(outcome.coins)
             else:
-                outcome = WinOutcome(
-                    embed=paper_embed(f"{SPONGE} Puzzle solved — yay!"),
-                    coins=0,
-                    quiet=True,
-                )
+                coins = 0
 
-            embed = outcome.embed
-            coins = int(outcome.coins)
-            quiet = bool(outcome.quiet)
-            reward_line = (
-                f"{SPONGE} **I'm ready!** Solved · {format_sponges(coins, signed=True)}"
-                if coins
-                else f"{SPONGE} **Puzzle solved!**"
-            )
-
-            def _fresh_board_file(*, with_banner: bool) -> discord.File:
-                image = render_board(
+            # 2) Update THIS message only: solved board + congratulations strip (no embed / no channel spam)
+            file = board_to_file(
+                render_board(
                     game["board"],
                     game["given"],
                     solution=game.get("solution"),
                     conflicts=set(),
                     difficulty=game.get("difficulty"),
-                    reward_sponges=(None if quiet or not with_banner else coins),
+                    reward_sponges=coins if coins else 0,
                 )
-                return board_to_file(image)
-
-            # --- 2) Post UI with fallbacks (fresh file each attempt) ---
-            posted = False
-            if quiet:
-                try:
-                    await interaction.edit_original_response(
-                        content=f"{PINEAPPLE} **Daily complete**",
-                        embed=None,
-                        view=None,
-                        attachments=[_fresh_board_file(with_banner=False)],
-                    )
-                    posted = True
-                except discord.HTTPException:
-                    pass
-            else:
-                attempts = (
-                    # Best: board + banner + embed
-                    lambda: interaction.edit_original_response(
-                        content=reward_line,
-                        embed=embed,
-                        view=None,
-                        attachments=[_fresh_board_file(with_banner=True)],
-                    ),
-                    # Board only + embed
-                    lambda: interaction.edit_original_response(
-                        content=reward_line,
-                        embed=embed,
-                        view=None,
-                        attachments=[_fresh_board_file(with_banner=False)],
-                    ),
-                    # Embed only (no attachment)
-                    lambda: interaction.edit_original_response(
-                        content=reward_line,
-                        embed=embed,
-                        view=None,
-                        attachments=[],
-                    ),
-                    # New message fallback
-                    lambda: interaction.followup.send(
-                        content=reward_line,
-                        embed=embed,
-                        file=_fresh_board_file(with_banner=True),
-                    ),
-                    lambda: interaction.followup.send(
-                        content=reward_line,
-                        embed=embed,
-                    ),
+            )
+            try:
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=None,
+                    view=None,
+                    attachments=[file],
                 )
-                for attempt in attempts:
-                    try:
-                        await attempt()
-                        posted = True
-                        break
-                    except Exception as ui_exc:  # noqa: BLE001
-                        print(f"win UI attempt failed: {ui_exc}")
-
-            key = self.game_key
-            await remove_game(key)
-            self.stop()
-
-            if not posted:
+            except discord.HTTPException as ui_exc:
+                print(f"win board edit failed: {ui_exc}")
+                # Last resort: strip controls only — never leave session open
                 try:
-                    await interaction.followup.send(
-                        f"{BUBBLE} Puzzle solved — rewards are in `/stats` "
-                        f"({format_sponges(coins, signed=True)}).",
-                        ephemeral=True,
-                    )
+                    await interaction.edit_original_response(view=None, embed=None)
                 except discord.HTTPException:
                     pass
         except Exception:
             import traceback
 
             traceback.print_exc()
-            # Keep the correct digit on the board and recover the panel
-            if self.game_key in games:
-                # If we already awarded, still try to close the board cleanly
-                if game.get("rewarded"):
-                    try:
-                        file = board_to_file(
-                            render_board(
-                                game["board"],
-                                game["given"],
-                                solution=game.get("solution"),
-                                conflicts=set(),
-                                difficulty=game.get("difficulty"),
-                            )
-                        )
-                        await remove_game(self.game_key)
-                        self.stop()
-                        await interaction.edit_original_response(
-                            content=f"{SPONGE} **Puzzle solved!** Check `/stats` for sponges.",
-                            embed=None,
-                            view=None,
-                            attachments=[file],
-                        )
-                        return
-                    except Exception:
-                        game["finishing"] = False
-                        game.pop("_digit_lock", None)
-                else:
-                    game["finishing"] = False
-                    game.pop("_digit_lock", None)
-                    try:
-                        await self.refresh(interaction)
-                    except Exception:
-                        pass
             try:
                 await interaction.followup.send(
-                    f"{BUBBLE} You finished the puzzle, but the win screen failed to post. "
-                    f"Check `/stats` for sponges.",
+                    f"{BUBBLE} Puzzle solved — check `/stats` for sponges.",
                     ephemeral=True,
                 )
             except discord.HTTPException:
                 pass
+        finally:
+            # ALWAYS close the session so /play /daily work without Quit
+            self.stop()
+            if key in games:
+                await remove_game(key)
+            else:
+                await drop_persisted_game(key)
 
     async def on_forfeit(self, interaction: discord.Interaction) -> None:
         game = games.get(self.game_key)
