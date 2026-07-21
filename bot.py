@@ -153,8 +153,12 @@ def load_data() -> dict:
 
 
 def save_data(data: dict) -> None:
-    with DATA_FILE.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with DATA_FILE.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError as exc:
+        # Don't lose the in-memory award if the disk write fails (e.g. ephemeral FS hiccup)
+        print(f"save_data failed: {exc}")
 
 
 def guild_stats(data: dict, guild_id: int) -> dict:
@@ -1110,7 +1114,7 @@ async def finish_win_and_announce(
     user: discord.abc.User,
     game: dict,
 ) -> WinOutcome:
-    """Award win; for daily, gate rewards on first MongoDB claim (no channel spam)."""
+    """Award win; for daily, gate rewards on first claim (Mongo or local)."""
     if game.get("mode") != "daily":
         return finish_win(bot.data, guild_id, user, game)
 
@@ -1119,21 +1123,34 @@ async def finish_win_and_announce(
     tier = difficulty_label(game.get("difficulty"))
     gstats = guild_stats(bot.data, guild_id)
     stats = user_stats(gstats, user.id)
+
+    # Local gate — already cleared today
+    daily_meta = get_guild_daily(bot.data, guild_id)
+    prior = daily_meta.get("results", {}).get(str(user.id)) or {}
+    if prior.get("won"):
+        return finish_win(bot.data, guild_id, user, game, award=False)
+
     preview_coins = win_reward(
         stats["streak"] + 1,
         daily=True,
         difficulty=game.get("difficulty"),
     )
 
-    first = await match_store.try_claim_daily_win(
-        guild_id=guild_id,
-        user_id=user.id,
-        day=day,
-        elapsed=elapsed,
-        hints=0,
-        difficulty=tier,
-        coins=preview_coins,
-    )
+    first = True
+    try:
+        first = await match_store.try_claim_daily_win(
+            guild_id=guild_id,
+            user_id=user.id,
+            day=day,
+            elapsed=elapsed,
+            hints=0,
+            difficulty=tier,
+            coins=preview_coins,
+        )
+    except Exception as exc:  # noqa: BLE001 — don't block rewards if Mongo is down
+        print(f"try_claim_daily_win failed (awarding via local data): {exc}")
+        first = True
+
     if not first:
         return finish_win(bot.data, guild_id, user, game, award=False)
 
@@ -2442,97 +2459,151 @@ class SudokuView(discord.ui.View):
                 await self.refresh(interaction)
                 return
 
-            if game.get("rewarded"):
-                # Award already done but UI may have failed — finish the panel once.
-                try:
-                    image = render_board(
-                        game["board"],
-                        game["given"],
-                        solution=game["solution"],
-                        conflicts=set(),
-                        difficulty=game.get("difficulty"),
-                    )
-                    file = board_to_file(image)
-                    key = self.game_key
-                    await remove_game(key)
-                    self.stop()
-                    await interaction.edit_original_response(
-                        content=f"{SPONGE} **Aye aye — puzzle solved!**",
-                        embed=None,
-                        view=None,
-                        attachments=[file],
-                    )
-                except Exception:
-                    game["finishing"] = False
-                    game.pop("_digit_lock", None)
-                return
+            # --- 1) Award first (so a UI failure never loses sponges) ---
+            if not game.get("rewarded"):
+                outcome = await finish_win_and_announce(
+                    self.bot,
+                    guild_id,
+                    interaction.user,
+                    game,
+                )
+                game["rewarded"] = True
+            else:
+                outcome = WinOutcome(
+                    embed=paper_embed(f"{SPONGE} Puzzle solved — yay!"),
+                    coins=0,
+                    quiet=True,
+                )
 
-            outcome = await finish_win_and_announce(
-                self.bot,
-                guild_id,
-                interaction.user,
-                game,
-            )
-            game["rewarded"] = True
             embed = outcome.embed
             coins = int(outcome.coins)
             quiet = bool(outcome.quiet)
-            image = render_board(
-                game["board"],
-                game["given"],
-                solution=game["solution"],
-                conflicts=set(),
-                difficulty=game.get("difficulty"),
-                reward_sponges=None if quiet else coins,
+            reward_line = (
+                f"{SPONGE} **I'm ready!** Solved · {format_sponges(coins, signed=True)}"
+                if coins
+                else f"{SPONGE} **Puzzle solved!**"
             )
-            file = board_to_file(image)
+
+            def _fresh_board_file(*, with_banner: bool) -> discord.File:
+                image = render_board(
+                    game["board"],
+                    game["given"],
+                    solution=game.get("solution"),
+                    conflicts=set(),
+                    difficulty=game.get("difficulty"),
+                    reward_sponges=(None if quiet or not with_banner else coins),
+                )
+                return board_to_file(image)
+
+            # --- 2) Post UI with fallbacks (fresh file each attempt) ---
+            posted = False
+            if quiet:
+                try:
+                    await interaction.edit_original_response(
+                        content=f"{PINEAPPLE} **Daily complete**",
+                        embed=None,
+                        view=None,
+                        attachments=[_fresh_board_file(with_banner=False)],
+                    )
+                    posted = True
+                except discord.HTTPException:
+                    pass
+            else:
+                attempts = (
+                    # Best: board + banner + embed
+                    lambda: interaction.edit_original_response(
+                        content=reward_line,
+                        embed=embed,
+                        view=None,
+                        attachments=[_fresh_board_file(with_banner=True)],
+                    ),
+                    # Board only + embed
+                    lambda: interaction.edit_original_response(
+                        content=reward_line,
+                        embed=embed,
+                        view=None,
+                        attachments=[_fresh_board_file(with_banner=False)],
+                    ),
+                    # Embed only (no attachment)
+                    lambda: interaction.edit_original_response(
+                        content=reward_line,
+                        embed=embed,
+                        view=None,
+                        attachments=[],
+                    ),
+                    # New message fallback
+                    lambda: interaction.followup.send(
+                        content=reward_line,
+                        embed=embed,
+                        file=_fresh_board_file(with_banner=True),
+                    ),
+                    lambda: interaction.followup.send(
+                        content=reward_line,
+                        embed=embed,
+                    ),
+                )
+                for attempt in attempts:
+                    try:
+                        await attempt()
+                        posted = True
+                        break
+                    except Exception as ui_exc:  # noqa: BLE001
+                        print(f"win UI attempt failed: {ui_exc}")
+
             key = self.game_key
             await remove_game(key)
             self.stop()
 
-            if quiet:
-                # Already awarded — close controls only, no extra chat message.
+            if not posted:
                 try:
-                    await interaction.edit_original_response(
-                        content=None,
-                        embed=None,
-                        view=None,
-                        attachments=[file],
+                    await interaction.followup.send(
+                        f"{BUBBLE} Puzzle solved — rewards are in `/stats` "
+                        f"({format_sponges(coins, signed=True)}).",
+                        ephemeral=True,
                     )
                 except discord.HTTPException:
                     pass
-                return
-
-            reward_line = f"{SPONGE} **I'm ready!** Solved · {format_sponges(coins, signed=True)}"
-            try:
-                await interaction.edit_original_response(
-                    content=reward_line,
-                    embed=embed,
-                    view=None,
-                    attachments=[file],
-                )
-            except discord.HTTPException:
-                await interaction.followup.send(
-                    content=reward_line,
-                    embed=embed,
-                    file=file,
-                )
         except Exception:
             import traceback
 
             traceback.print_exc()
             # Keep the correct digit on the board and recover the panel
             if self.game_key in games:
-                game["finishing"] = False
-                game.pop("_digit_lock", None)
-                try:
-                    await self.refresh(interaction)
-                except Exception:
-                    pass
+                # If we already awarded, still try to close the board cleanly
+                if game.get("rewarded"):
+                    try:
+                        file = board_to_file(
+                            render_board(
+                                game["board"],
+                                game["given"],
+                                solution=game.get("solution"),
+                                conflicts=set(),
+                                difficulty=game.get("difficulty"),
+                            )
+                        )
+                        await remove_game(self.game_key)
+                        self.stop()
+                        await interaction.edit_original_response(
+                            content=f"{SPONGE} **Puzzle solved!** Check `/stats` for sponges.",
+                            embed=None,
+                            view=None,
+                            attachments=[file],
+                        )
+                        return
+                    except Exception:
+                        game["finishing"] = False
+                        game.pop("_digit_lock", None)
+                else:
+                    game["finishing"] = False
+                    game.pop("_digit_lock", None)
+                    try:
+                        await self.refresh(interaction)
+                    except Exception:
+                        pass
             try:
                 await interaction.followup.send(
-                    f"{BUBBLE} You finished the puzzle, but rewards failed to post. "
-                    f"Try `/stats` — if sponges didn't update, ping an admin.",
+                    f"{BUBBLE} You finished the puzzle, but the win screen failed to post. "
+                    f"Check `/stats` for sponges.",
                     ephemeral=True,
                 )
             except discord.HTTPException:

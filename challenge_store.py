@@ -229,6 +229,11 @@ class MongoMatchStore(MatchStore):
     ) -> bool:
         from pymongo.errors import DuplicateKeyError
 
+        if self._daily is None:
+            await self.connect()
+        if self._daily is None:
+            raise RuntimeError("Mongo daily collection not connected")
+
         doc = {
             "_id": f"{guild_id}:{day}:{user_id}",
             "guild_id": guild_id,
