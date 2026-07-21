@@ -3175,156 +3175,463 @@ class SudokuView(discord.ui.View):
 # Shop
 # ---------------------------------------------------------------------------
 
-class ShopTitleSelect(discord.ui.Select):
-    def __init__(self, bot: "SudokuBot"):
-        self.bot = bot
-        options = [
-            discord.SelectOption(
-                label=f"{meta['label']} — {meta['cost']} {SPONGE}",
-                value=f"title:{tid}",
-                description="Cosmetic title · buy or re-equip",
-            )
+def shop_catalog(kind: str) -> list[dict]:
+    """Browseable catalog entries for the Krusty Shop carousel."""
+    if kind == "titles":
+        return [
+            {
+                "kind": "title",
+                "id": tid,
+                "label": meta["label"],
+                "emoji": meta.get("emoji", SPONGE),
+                "cost": int(meta["cost"]),
+                "pin": meta.get("pin") or cosmetic_pin_text(meta),
+            }
             for tid, meta in SHOP_TITLES.items()
         ]
-        super().__init__(placeholder="Titles — buy or equip…", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        await _shop_buy_or_equip(interaction, self.bot, self.values[0])
-
-
-class ShopThemeSelect(discord.ui.Select):
-    def __init__(self, bot: "SudokuBot"):
-        self.bot = bot
-        options = [
-            discord.SelectOption(
-                label=f"🌊 Lagoon Classic — free",
-                value="theme:",
-                description="Default board colors",
-            )
-        ]
-        options.extend(
-            discord.SelectOption(
-                label=f"{meta['label']} — {meta['cost']} {SPONGE}",
-                value=f"theme:{tid}",
-                description="Board color pack · buy or re-equip",
-            )
-            for tid, meta in SHOP_THEMES.items()
+    items = [
+        {
+            "kind": "theme",
+            "id": "",
+            "label": "Lagoon Classic",
+            "emoji": "🌊",
+            "cost": 0,
+            "pin": "Lagoon",
+        }
+    ]
+    for tid, meta in SHOP_THEMES.items():
+        items.append(
+            {
+                "kind": "theme",
+                "id": tid,
+                "label": meta["label"],
+                "emoji": meta.get("emoji", WAVE),
+                "cost": int(meta["cost"]),
+                "pin": meta.get("pin") or cosmetic_pin_text(meta),
+            }
         )
-        super().__init__(placeholder="Board themes — buy or equip…", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        await _shop_buy_or_equip(interaction, self.bot, self.values[0])
+    return items
 
 
-async def _shop_buy_or_equip(
-    interaction: discord.Interaction,
-    bot: "SudokuBot",
-    choice: str,
-) -> None:
-    if interaction.guild is None:
-        await interaction.response.send_message("Server only.", ephemeral=True)
-        return
-    gstats = guild_stats(bot.data, interaction.guild.id)
-    stats = user_stats(gstats, interaction.user.id)
-    stats["name"] = interaction.user.display_name
-    who = interaction.user.mention
+def shop_item_owned(stats: dict, item: dict) -> bool:
+    if item["kind"] == "title":
+        return item["id"] in (stats.get("owned_titles") or [])
+    if not item["id"]:
+        return True  # Lagoon Classic is always "owned"
+    return item["id"] in (stats.get("owned_themes") or [])
 
-    if choice.startswith("title:"):
-        tid = choice.split(":", 1)[1]
+
+def shop_item_equipped(stats: dict, item: dict) -> bool:
+    if item["kind"] == "title":
+        return stats.get("title") == item["id"]
+    if not item["id"]:
+        return not stats.get("board_theme")
+    return stats.get("board_theme") == item["id"]
+
+
+def shop_item_embed(
+    *,
+    stats: dict,
+    item: dict,
+    kind: str,
+    index: int,
+    total: int,
+) -> discord.Embed:
+    owned = shop_item_owned(stats, item)
+    equipped = shop_item_equipped(stats, item)
+    if equipped:
+        status = "Equipped"
+    elif owned:
+        status = "Owned"
+    else:
+        status = "Locked"
+
+    cost = int(item["cost"])
+    price = "FREE" if cost <= 0 else format_sponges(cost)
+    embed = paper_embed(f"{SPONGE} Krusty Shop · {kind.title()}")
+    embed.description = (
+        f"{item['emoji']} **{item['label']}**\n"
+        f"*Browse with Prev/Next — Buy or Equip below.*\n"
+        f"*No refunds. Squidward is watching.*"
+    )
+    embed.add_field(name="Price", value=f"**{price}**", inline=True)
+    embed.add_field(name="Status", value=f"**{status}**", inline=True)
+    embed.add_field(
+        name=f"Pocket {SPONGE}",
+        value=f"**{format_sponges(stats.get('coins', 0))}**",
+        inline=True,
+    )
+    embed.add_field(name="Catalog", value=f"**{index + 1}** / **{total}**", inline=True)
+
+    if item["kind"] == "title":
+        sample = titled_header_line("Easy", item.get("pin") or "Civilian")
+        embed.add_field(
+            name="Header flair",
+            value=f"`{sample}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Board pin",
+            value=f"Adds {item['emoji']} to your border collection when owned.",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Look",
+            value="Board color pack — press **Preview** to peek.",
+            inline=False,
+        )
+        if item["id"]:
+            embed.add_field(
+                name="Board pin",
+                value=f"Adds {item['emoji']} to your border collection when owned.",
+                inline=False,
+            )
+
+    eq_title = (
+        SHOP_TITLES[stats["title"]]["label"]
+        if stats.get("title") in SHOP_TITLES
+        else "Civilian"
+    )
+    eq_theme = (
+        SHOP_THEMES[stats["board_theme"]]["label"]
+        if stats.get("board_theme") in SHOP_THEMES
+        else "🌊 Lagoon Classic"
+    )
+    embed.add_field(name="Equipped now", value=f"{eq_title} · {eq_theme}", inline=False)
+    return embed
+
+
+def apply_shop_equip(bot: "SudokuBot", guild_id: int, user_id: int, item: dict) -> dict:
+    """Equip an owned item. Returns {ok, message}."""
+    gstats = guild_stats(bot.data, guild_id)
+    stats = user_stats(gstats, user_id)
+    if item["kind"] == "title":
+        tid = item["id"]
         if tid not in SHOP_TITLES:
-            await interaction.response.send_message("Unknown item.", ephemeral=True)
-            return
-        meta = SHOP_TITLES[tid]
+            return {"ok": False, "message": "Unknown title."}
+        if tid not in stats["owned_titles"]:
+            return {"ok": False, "message": "You don't own this title yet — Buy it first."}
+        stats["title"] = tid
+        save_data(bot.data)
+        sync_title_to_active_games(user_id, guild_id, tid)
+        sync_pins_to_active_games(user_id, guild_id, owned_pin_emojis(stats))
+        return {
+            "ok": True,
+            "message": f"Equipped **{item['label']}**. Active boards pick it up on the next move.",
+        }
+
+    tid = item["id"]
+    if tid and tid not in SHOP_THEMES:
+        return {"ok": False, "message": "Unknown theme."}
+    if tid and tid not in stats["owned_themes"]:
+        return {"ok": False, "message": "You don't own this theme yet — Buy it first."}
+    stats["board_theme"] = tid or None
+    save_data(bot.data)
+    sync_theme_to_active_games(user_id, guild_id, tid or None)
+    sync_pins_to_active_games(user_id, guild_id, owned_pin_emojis(stats))
+    label = item["label"] if tid else "🌊 Lagoon Classic"
+    return {
+        "ok": True,
+        "message": f"Equipped board theme **{label}**. Next refresh uses it.",
+    }
+
+
+def apply_shop_purchase(bot: "SudokuBot", guild_id: int, user_id: int, item: dict) -> dict:
+    """Buy + auto-equip. Returns {ok, bought, message, label, cost}."""
+    gstats = guild_stats(bot.data, guild_id)
+    stats = user_stats(gstats, user_id)
+    cost = int(item["cost"])
+
+    if item["kind"] == "title":
+        tid = item["id"]
+        if tid not in SHOP_TITLES:
+            return {"ok": False, "bought": False, "message": "Unknown title."}
         if tid in stats["owned_titles"]:
-            stats["title"] = tid
-            save_data(bot.data)
-            sync_title_to_active_games(interaction.user.id, interaction.guild.id, tid)
-            sync_pins_to_active_games(
-                interaction.user.id, interaction.guild.id, owned_pin_emojis(stats)
-            )
-            await interaction.response.send_message(
-                f"Equipped **{meta['label']}**. Active boards pick up pins on the next move.",
-                ephemeral=True,
-            )
-            return
-        if stats["coins"] < meta["cost"]:
-            await interaction.response.send_message(
-                f"Need **{format_sponges(meta['cost'])}** (you have {format_sponges(stats['coins'])}).",
-                ephemeral=True,
-            )
-            return
-        stats["coins"] -= meta["cost"]
+            return {"ok": False, "bought": False, "message": "Already owned — use Equip."}
+        if stats["coins"] < cost:
+            return {
+                "ok": False,
+                "bought": False,
+                "message": (
+                    f"Need **{format_sponges(cost)}** "
+                    f"(you have {format_sponges(stats['coins'])})."
+                ),
+            }
+        stats["coins"] -= cost
         stats["owned_titles"].append(tid)
         stats["title"] = tid
         save_data(bot.data)
-        sync_title_to_active_games(interaction.user.id, interaction.guild.id, tid)
-        sync_pins_to_active_games(
-            interaction.user.id, interaction.guild.id, owned_pin_emojis(stats)
-        )
-        # Public flex — shop UI stays private, the haul is channel-visible
-        await interaction.response.send_message(
-            f"{SPONGE} {who} bought the title **{meta['label']}** "
-            f"(−{meta['cost']} {SPONGE}) · pocket now **{format_sponges(stats['coins'])}**!",
-        )
-        return
+        sync_title_to_active_games(user_id, guild_id, tid)
+        sync_pins_to_active_games(user_id, guild_id, owned_pin_emojis(stats))
+        return {
+            "ok": True,
+            "bought": True,
+            "label": item["label"],
+            "cost": cost,
+            "message": f"Bought **{item['label']}**!",
+        }
 
-    if choice.startswith("theme:"):
-        tid = choice.split(":", 1)[1]
-        if not tid:
-            stats["board_theme"] = None
-            save_data(bot.data)
-            sync_theme_to_active_games(interaction.user.id, interaction.guild.id, None)
-            sync_pins_to_active_games(
-                interaction.user.id, interaction.guild.id, owned_pin_emojis(stats)
+    tid = item["id"]
+    if not tid:
+        return {"ok": False, "bought": False, "message": "Lagoon Classic is free — use Equip."}
+    if tid not in SHOP_THEMES:
+        return {"ok": False, "bought": False, "message": "Unknown theme."}
+    if tid in stats["owned_themes"]:
+        return {"ok": False, "bought": False, "message": "Already owned — use Equip."}
+    if stats["coins"] < cost:
+        return {
+            "ok": False,
+            "bought": False,
+            "message": (
+                f"Need **{format_sponges(cost)}** "
+                f"(you have {format_sponges(stats['coins'])})."
+            ),
+        }
+    stats["coins"] -= cost
+    stats["owned_themes"].append(tid)
+    stats["board_theme"] = tid
+    save_data(bot.data)
+    sync_theme_to_active_games(user_id, guild_id, tid)
+    sync_pins_to_active_games(user_id, guild_id, owned_pin_emojis(stats))
+    return {
+        "ok": True,
+        "bought": True,
+        "label": item["label"],
+        "cost": cost,
+        "message": f"Bought **{item['label']}**!",
+    }
+
+
+def shop_preview_file(stats: dict, item: dict) -> discord.File:
+    """Easy board preview for the current catalog item."""
+    board, given, solution = make_puzzle("easy")
+    theme_id = None
+    title_id = None
+    if item["kind"] == "theme":
+        theme_id = item["id"] or None
+        title_id = equipped_title_id(stats)
+    else:
+        title_id = item["id"]
+        theme_id = equipped_theme_id(stats)
+    pins = list(owned_pin_emojis(stats))
+    emoji = item.get("emoji")
+    if emoji and emoji not in pins:
+        pins = pins + [emoji]
+    image = render_board(
+        board,
+        given,
+        solution=solution,
+        difficulty="Easy",
+        theme_id=theme_id,
+        title_id=title_id,
+        pin_emojis=pins,
+        pin_seed=21,
+    )
+    return board_to_file(image)
+
+
+class KrustyShopView(discord.ui.View):
+    """Interactive catalog: Titles/Themes tabs, carousel, Buy/Equip/Preview."""
+
+    def __init__(
+        self,
+        bot: "SudokuBot",
+        *,
+        owner_id: int,
+        guild_id: int,
+        kind: str = "titles",
+        index: int = 0,
+    ):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.kind = kind if kind in ("titles", "themes") else "titles"
+        self.index = max(0, index)
+        self._rebuild()
+
+    def catalog(self) -> list[dict]:
+        return shop_catalog(self.kind)
+
+    def current_item(self) -> dict:
+        items = self.catalog()
+        if not items:
+            return {
+                "kind": "title",
+                "id": "",
+                "label": "Empty",
+                "emoji": SPONGE,
+                "cost": 0,
+                "pin": "",
+            }
+        self.index %= len(items)
+        return items[self.index]
+
+    def _stats(self) -> dict:
+        gstats = guild_stats(self.bot.data, self.guild_id)
+        return user_stats(gstats, self.owner_id)
+
+    def build_embed(self) -> discord.Embed:
+        items = self.catalog()
+        item = self.current_item()
+        return shop_item_embed(
+            stats=self._stats(),
+            item=item,
+            kind=self.kind,
+            index=self.index,
+            total=len(items),
+        )
+
+    def _rebuild(self) -> None:
+        self.clear_items()
+        stats = self._stats()
+        item = self.current_item()
+        owned = shop_item_owned(stats, item)
+
+        titles_btn = discord.ui.Button(
+            label="Titles",
+            style=discord.ButtonStyle.primary if self.kind == "titles" else discord.ButtonStyle.secondary,
+            row=0,
+            custom_id="shop:titles",
+        )
+        themes_btn = discord.ui.Button(
+            label="Themes",
+            style=discord.ButtonStyle.primary if self.kind == "themes" else discord.ButtonStyle.secondary,
+            row=0,
+            custom_id="shop:themes",
+        )
+        titles_btn.callback = self.on_titles
+        themes_btn.callback = self.on_themes
+        self.add_item(titles_btn)
+        self.add_item(themes_btn)
+
+        prev_btn = discord.ui.Button(
+            label="Prev",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            custom_id="shop:prev",
+        )
+        next_btn = discord.ui.Button(
+            label="Next",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            custom_id="shop:next",
+        )
+        prev_btn.callback = self.on_prev
+        next_btn.callback = self.on_next
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+
+        if owned:
+            action = discord.ui.Button(
+                label="Equip",
+                style=discord.ButtonStyle.success,
+                row=2,
+                custom_id="shop:equip",
+                disabled=shop_item_equipped(stats, item),
             )
+            action.callback = self.on_equip
+        else:
+            action = discord.ui.Button(
+                label=f"Buy ({item['cost']} {SPONGE})" if item["cost"] else "Buy",
+                style=discord.ButtonStyle.danger,
+                row=2,
+                custom_id="shop:buy",
+            )
+            action.callback = self.on_buy
+        self.add_item(action)
+
+        preview = discord.ui.Button(
+            label="Preview",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+            custom_id="shop:preview",
+        )
+        preview.callback = self.on_preview
+        self.add_item(preview)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Equipped **🌊 Lagoon Classic**.", ephemeral=True
-            )
-            return
-        if tid not in SHOP_THEMES:
-            await interaction.response.send_message("Unknown item.", ephemeral=True)
-            return
-        meta = SHOP_THEMES[tid]
-        if tid in stats["owned_themes"]:
-            stats["board_theme"] = tid
-            save_data(bot.data)
-            sync_theme_to_active_games(interaction.user.id, interaction.guild.id, tid)
-            sync_pins_to_active_games(
-                interaction.user.id, interaction.guild.id, owned_pin_emojis(stats)
-            )
-            await interaction.response.send_message(
-                f"Equipped board theme **{meta['label']}**. Next refresh uses it.",
+                "This Krusty Shop ticket isn't yours — open `/shop`.",
                 ephemeral=True,
             )
+            return False
+        return True
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        self._rebuild()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self, attachments=[])
+
+    async def on_titles(self, interaction: discord.Interaction) -> None:
+        self.kind = "titles"
+        self.index = 0
+        await self._refresh(interaction)
+
+    async def on_themes(self, interaction: discord.Interaction) -> None:
+        self.kind = "themes"
+        self.index = 0
+        await self._refresh(interaction)
+
+    async def on_prev(self, interaction: discord.Interaction) -> None:
+        items = self.catalog()
+        self.index = (self.index - 1) % max(1, len(items))
+        await self._refresh(interaction)
+
+    async def on_next(self, interaction: discord.Interaction) -> None:
+        items = self.catalog()
+        self.index = (self.index + 1) % max(1, len(items))
+        await self._refresh(interaction)
+
+    async def on_equip(self, interaction: discord.Interaction) -> None:
+        result = apply_shop_equip(
+            self.bot, self.guild_id, self.owner_id, self.current_item()
+        )
+        self._rebuild()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self, attachments=[])
+        await interaction.followup.send(result["message"], ephemeral=True)
+
+    async def on_buy(self, interaction: discord.Interaction) -> None:
+        item = self.current_item()
+        result = apply_shop_purchase(self.bot, self.guild_id, self.owner_id, item)
+        self._rebuild()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self, attachments=[])
+        if not result["ok"]:
+            await interaction.followup.send(result["message"], ephemeral=True)
             return
-        if stats["coins"] < meta["cost"]:
-            await interaction.response.send_message(
-                f"Need **{format_sponges(meta['cost'])}** (you have {format_sponges(stats['coins'])}).",
-                ephemeral=True,
+        # Public flex in the channel; shop UI stays ephemeral
+        who = interaction.user.mention
+        cost = int(result.get("cost") or 0)
+        pocket = format_sponges(self._stats().get("coins", 0))
+        announce = (
+            f"{SPONGE} {who} bought **{result['label']}** "
+            f"(−{cost} {SPONGE}) · pocket now **{pocket}**!"
+        )
+        try:
+            if interaction.channel is not None:
+                await interaction.channel.send(announce)
+            else:
+                await interaction.followup.send(announce)
+        except discord.HTTPException:
+            await interaction.followup.send(result["message"], ephemeral=True)
+
+    async def on_preview(self, interaction: discord.Interaction) -> None:
+        stats = self._stats()
+        item = self.current_item()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            file = shop_preview_file(stats, item)
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(
+                f"Couldn't render preview: {exc}", ephemeral=True
             )
             return
-        stats["coins"] -= meta["cost"]
-        stats["owned_themes"].append(tid)
-        stats["board_theme"] = tid
-        save_data(bot.data)
-        sync_theme_to_active_games(interaction.user.id, interaction.guild.id, tid)
-        sync_pins_to_active_games(
-            interaction.user.id, interaction.guild.id, owned_pin_emojis(stats)
+        await interaction.followup.send(
+            content=f"{BUBBLE} Preview · **{item['label']}** (not a real game)",
+            file=file,
+            ephemeral=True,
         )
-        await interaction.response.send_message(
-            f"{SPONGE} {who} bought the board theme **{meta['label']}** "
-            f"(−{meta['cost']} {SPONGE}) · pocket now **{format_sponges(stats['coins'])}**!",
-        )
-        return
-
-    await interaction.response.send_message("Unknown item.", ephemeral=True)
-
-
-class ShopView(discord.ui.View):
-    def __init__(self, bot: "SudokuBot"):
-        super().__init__(timeout=120)
-        self.add_item(ShopTitleSelect(bot))
-        self.add_item(ShopThemeSelect(bot))
 
 
 # ---------------------------------------------------------------------------
@@ -3974,25 +4281,18 @@ async def shop_cmd(interaction: discord.Interaction):
     stats = user_stats(gstats, interaction.user.id)
     stats["name"] = interaction.user.display_name
     save_data(bot.data)
-    owned = ", ".join(SHOP_TITLES[t]["label"] for t in stats["owned_titles"] if t in SHOP_TITLES) or "Empty pockets"
-    themes = ", ".join(SHOP_THEMES[t]["label"] for t in stats["owned_themes"] if t in SHOP_THEMES) or "Lagoon only"
-    equipped = SHOP_TITLES[stats["title"]]["label"] if stats.get("title") in SHOP_TITLES else "Civilian"
-    theme_eq = (
-        SHOP_THEMES[stats["board_theme"]]["label"]
-        if stats.get("board_theme") in SHOP_THEMES
-        else "🌊 Lagoon Classic"
+    view = KrustyShopView(
+        bot,
+        owner_id=interaction.user.id,
+        guild_id=interaction.guild.id,
+        kind="titles",
+        index=0,
     )
-    embed = paper_embed(f"{SPONGE} Krusty Shop")
-    embed.description = (
-        f"{BUBBLE} Welcome! Spend sponges on titles & board themes.\n"
-        f"*No refunds. Squidward is watching.*"
+    await interaction.response.send_message(
+        embed=view.build_embed(),
+        view=view,
+        ephemeral=True,
     )
-    embed.add_field(name=f"Your pocket {SPONGE}", value=f"**{format_sponges(stats['coins'])}**", inline=True)
-    embed.add_field(name="Title", value=f"**{equipped}**", inline=True)
-    embed.add_field(name="Board", value=f"**{theme_eq}**", inline=True)
-    embed.add_field(name="Title closet", value=owned, inline=False)
-    embed.add_field(name="Theme closet", value=themes, inline=False)
-    await interaction.response.send_message(embed=embed, view=ShopView(bot), ephemeral=True)
 
 
 @bot.tree.command(name="quit", description="Leave your active Sudoku game or challenge")
