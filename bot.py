@@ -1196,22 +1196,21 @@ def render_board(
     title_meta = SHOP_TITLES.get(title_id or "")
     title_pin = cosmetic_pin_text(title_meta) if title_meta else ""
     if title_pin:
-        # Works for every difficulty tier; SpongeBob energy in the header
-        header_label = f"~ {tier} ~  I'm ready, {title_pin}!"
+        header_label = titled_header_line(tier, title_pin)
 
     header_font = board_font(18, bold=True)
     hb = draw.textbbox((0, 0), header_label, font=header_font)
     htw, hth = hb[2] - hb[0], hb[3] - hb[1]
     # Shrink slightly if the title line is too wide for the header
     if htw > canvas - 24:
-        header_font = board_font(15, bold=True)
+        header_font = board_font(14, bold=True)
         hb = draw.textbbox((0, 0), header_label, font=header_font)
         htw, hth = hb[2] - hb[0], hb[3] - hb[1]
-    if htw > canvas - 16:
+    if htw > canvas - 16 and title_pin:
         # Last resort: shorten the title pin
         while htw > canvas - 16 and len(title_pin) > 4:
             title_pin = title_pin[:-1]
-            header_label = f"~ {tier} ~  I'm ready, {title_pin}…!"
+            header_label = titled_header_line(tier, title_pin + "…")
             hb = draw.textbbox((0, 0), header_label, font=header_font)
             htw, hth = hb[2] - hb[0], hb[3] - hb[1]
     draw.text(
