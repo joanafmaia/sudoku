@@ -4412,14 +4412,13 @@ async def quit_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="leaderboard",
-    description="Bikini Bottom rankings — XP, daily, times, shop whales",
+    description="Bikini Bottom rankings — XP, daily today, shop whales",
 )
 @app_commands.describe(board="Which leaderboard to show")
 @app_commands.choices(
     board=[
         app_commands.Choice(name="XP (career)", value="xp"),
         app_commands.Choice(name="Today's daily", value="daily_today"),
-        app_commands.Choice(name="Best time", value="time"),
         app_commands.Choice(name="Shop whales", value="whales"),
     ]
 )
@@ -4485,17 +4484,7 @@ async def leaderboard_cmd(
 
     players = [(uid, user_stats(gstats, int(uid))) for uid, _ in iter_players(gstats)]
 
-    if mode == "time":
-        ranked = sorted(
-            ((uid, s) for uid, s in players if s.get("best_time") is not None),
-            key=lambda item: item[1]["best_time"],
-        )[:10]
-        title = f"{WAVE} Fastest clears"
-        blurb = "Boatmobile speedrun energy."
-        fmt = lambda s: f"**{format_time(s['best_time'])}**"
-        nonempty = lambda s: True
-        empty_msg = f"{BUBBLE} No best times yet — clear a board with `/play`!"
-    elif mode == "whales":
+    if mode == "whales":
         ranked = sorted(
             players,
             key=lambda item: int(item[1].get("sponges_spent") or 0),
