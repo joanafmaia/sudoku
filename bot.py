@@ -697,15 +697,9 @@ def owned_pin_ids(stats: dict) -> list[str]:
 
 
 def owned_pin_emojis(stats: dict) -> list[str]:
-    """Emojis from purchased titles + pins — scattered as border pins."""
+    """Border emojis from the Pins catalog only (titles are header flair, not pins)."""
     pins: list[str] = []
     seen: set[str] = set()
-    for tid in stats.get("owned_titles") or []:
-        meta = SHOP_TITLES.get(tid)
-        emoji = (meta or {}).get("emoji")
-        if emoji and emoji not in seen:
-            pins.append(emoji)
-            seen.add(emoji)
     for tid in owned_pin_ids(stats):
         meta = SHOP_PINS.get(tid)
         emoji = (meta or {}).get("emoji")
@@ -3360,7 +3354,7 @@ def shop_item_embed(
     if item["kind"] == "pin":
         hint = "*Browse with Prev/Next — Buy to add this emoji to your border.*"
     else:
-        hint = "*Browse with Prev/Next — Buy or Equip below.*"
+        hint = "*Browse with Prev/Next — Buy or Equip for header flair.*"
     embed.description = (
         f"{item['emoji']} **{item['label']}**\n"
         f"{hint}\n"
@@ -3378,13 +3372,11 @@ def shop_item_embed(
     if item["kind"] == "title":
         sample = titled_header_line("Easy", item.get("pin") or "Civilian")
         embed.add_field(
-            name="Header flair",
-            value=f"`{sample}`",
-            inline=False,
-        )
-        embed.add_field(
-            name="Bonus",
-            value=f"Also unlocks border pin {item['emoji']} when owned.",
+            name="What you get",
+            value=(
+                f"Header flair only — e.g. `{sample}`\n"
+                f"(Border emojis come from the **Pins** tab.)"
+            ),
             inline=False,
         )
     else:
@@ -3507,15 +3499,15 @@ def apply_shop_purchase(bot: "SudokuBot", guild_id: int, user_id: int, item: dic
 
 
 def shop_preview_file(stats: dict, item: dict) -> discord.File:
-    """Easy board preview for the current catalog item (Lagoon colors + pins)."""
+    """Easy board preview for a Pins catalog item (Lagoon colors + border pins)."""
     board, given, solution = make_puzzle("easy")
-    title_id = (
-        item["id"] if item["kind"] == "title" else equipped_title_id(stats)
-    )
+    title_id = equipped_title_id(stats)
     pins = list(owned_pin_emojis(stats))
-    emoji = item.get("emoji")
-    if emoji and emoji not in pins:
-        pins = pins + [emoji]
+    # Show the browsed pin even if not owned yet
+    if item.get("kind") == "pin":
+        emoji = item.get("emoji")
+        if emoji and emoji not in pins:
+            pins = pins + [emoji]
     image = render_board(
         board,
         given,
@@ -4082,7 +4074,9 @@ async def help_cmd(interaction: discord.Interaction):
         name=f"{XP} XP & {SPONGE} Sponges",
         value=(
             f"**XP** ranks the leaderboard (never spent).\n"
-            f"**Sponges** buy titles & pins in `/shop`.\n"
+            f"**Sponges** buy cosmetics in `/shop`:\n"
+            f"· **Titles** — header flair on your board\n"
+            f"· **Pins** — emoji stickers on the border\n"
             f"Solve **{format_xp(BASE_WIN_REWARD, signed=True)}** + "
             f"**{format_sponges(BASE_WIN_REWARD, signed=True)}** · "
             f"Daily **+{DAILY_BONUS}** each · "
