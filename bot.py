@@ -51,6 +51,7 @@ MAX_CHALLENGE_PLAYERS = 5  # challenger + up to 4 opponents
 CHALLENGE_LOSER_COINS = 25
 CHALLENGE_COOLDOWN_SEC = 60
 INVITE_TIMEOUT_SEC = 5 * 60
+DAILY_EPOCH = datetime(2024, 1, 1, tzinfo=timezone.utc).date()
 # Optional: set to your server ID for instant slash-command updates (global sync can lag).
 DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0") or 0)
 
