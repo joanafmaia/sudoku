@@ -1004,11 +1004,24 @@ def find_challenge_game_for_user(user_id: int) -> tuple | None:
 
 
 def paper_embed(title: str, *, description: str | None = None) -> discord.Embed:
-    """Bikini Bottom embed shell — sunny yellow."""
+    """Bikini Bottom embed shell — sunny yellow + themed footer."""
     embed = discord.Embed(title=title, color=COLOR_PAPER)
     if description:
         embed.description = description
+    embed.set_footer(text=f"{SPONGE} Bikini Bottom Sudoku  ·  I'm ready!")
     return embed
+
+
+def streak_flavor(streak: int) -> str:
+    if streak <= 0:
+        return "cold streak — time to jellyfish again"
+    if streak == 1:
+        return "just getting started"
+    if streak < 5:
+        return "warming up the grill"
+    if streak < 10:
+        return "Krusty Krab regular"
+    return "legendary fry cook energy"
 
 
 @dataclass(frozen=True)
@@ -2846,29 +2859,32 @@ async def help_cmd(interaction: discord.Interaction):
     )
     embed = paper_embed(f"{SPONGE} Sudoku · Bikini Bottom")
     embed.description = (
-        f"{WAVE} Ahoy! Fill 1–9 in every row, column, and box. "
+        f"{WAVE} Ahoy, neighbor!\n"
+        f"Fill **1–9** in every row, column, and box.\n"
         f"Earn **sponges** {SPONGE} — no duplicate numbers, only vibes."
     )
     embed.add_field(
         name=f"{BUBBLE} Play",
         value=(
-            "`/play` — solo puzzle (I'm ready!)\n"
+            "`/play` — solo puzzle (**I'm ready!**)\n"
             "`/daily` — one pineapple puzzle a day\n"
-            "`/challenge` — race your pals in a private board"
+            "`/challenge` — race your pals on private boards"
         ),
         inline=False,
     )
-    embed.add_field(name="Step 1", value="Arrow pad → pick a 3×3 box", inline=True)
-    embed.add_field(name="Step 2", value="Choose a cell", inline=True)
-    embed.add_field(name="Step 3", value="Enter 1–9 (tap again to erase) · Notes = doodles", inline=True)
+    embed.add_field(name="① Box", value="Arrow pad → pick a 3×3", inline=True)
+    embed.add_field(name="② Cell", value="Choose a square", inline=True)
+    embed.add_field(name="③ Number", value="1–9 · tap again to erase", inline=True)
     embed.add_field(
-        name="Rules",
-        value="Red cells = row / column / box clash. **Notes** for doodle marks. "
-        "**Quit** (or `/quit`) leaves the board.",
+        name=f"{JELLY} Rules",
+        value=(
+            "Red cells = clash in row / column / box.\n"
+            "**Notes** = doodle candidates · **Quit** leaves the board."
+        ),
         inline=False,
     )
     embed.add_field(
-        name=f"Rewards {SPONGE}",
+        name=f"{SPONGE} Sponges",
         value=(
             f"Solve **{format_sponges(BASE_WIN_REWARD, signed=True)}** · "
             f"Daily **{format_sponges(DAILY_BONUS, signed=True)}** · "
@@ -2880,8 +2896,8 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="More",
-        value="`/shop` `/quit` `/leaderboard` `/stats` `/dailyboard`",
+        name=f"{PINEAPPLE} More",
+        value="`/shop` · `/stats` · `/leaderboard` · `/dailyboard` · `/quit`",
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -3176,7 +3192,7 @@ async def daily_cmd(interaction: discord.Interaction):
             )
 
 
-@bot.tree.command(name="dailyboard", description="Today's daily Sudoku rankings")
+@bot.tree.command(name="dailyboard", description="Today's pineapple daily rankings")
 async def dailyboard_cmd(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
@@ -3186,7 +3202,7 @@ async def dailyboard_cmd(interaction: discord.Interaction):
     results = daily.get("results") or {}
     if not results:
         await interaction.response.send_message(
-            f"No results for **{daily['date']}** yet. Try `/daily`!",
+            f"{PINEAPPLE} Nobody's cleared today's pineapple yet — be the first with `/daily`!",
             ephemeral=True,
         )
         return
@@ -3194,14 +3210,17 @@ async def dailyboard_cmd(interaction: discord.Interaction):
     winners = [(uid, r) for uid, r in results.items() if r.get("won")]
     winners.sort(key=lambda item: item[1].get("time", 10**9))
     lines = []
-    medals = ["1.", "2.", "3."]
+    medals = ["🥇", "🥈", "🥉"]
     for i, (uid, r) in enumerate(winners[:10]):
-        prefix = medals[i] if i < 3 else f"{i + 1}."
+        prefix = medals[i] if i < 3 else f"`{i + 1}.`"
         gstats = guild_stats(bot.data, interaction.guild.id)
         stats = user_stats(gstats, int(uid))
         name = display_name(stats) if stats.get("name") != "Unknown" else r.get("name", uid)
+        sponge_bit = ""
+        if r.get("coins"):
+            sponge_bit = f" · {format_sponges(int(r['coins']), signed=True)}"
         lines.append(
-            f"{prefix} **{name}** — {format_time(r.get('time', 0))}"
+            f"{prefix} **{name}** — {format_time(r.get('time', 0))}{sponge_bit}"
         )
 
     failed = sum(
@@ -3209,19 +3228,20 @@ async def dailyboard_cmd(interaction: discord.Interaction):
         for r in results.values()
         if not r.get("won") and not r.get("in_progress")
     )
-    embed = paper_embed(f"Daily #{daily_puzzle_number(daily['date'])}")
-    embed.add_field(name="Date", value=daily["date"], inline=True)
-    embed.add_field(name="Solved", value=str(len(winners)), inline=True)
-    embed.add_field(name="Other", value=str(failed), inline=True)
+    embed = paper_embed(f"{PINEAPPLE} Daily #{daily_puzzle_number(daily['date'])}")
+    embed.description = f"{WAVE} Fastest clearers of today's pineapple puzzle."
+    embed.add_field(name="Date", value=f"`{daily['date']}`", inline=True)
+    embed.add_field(name=f"Cleared {STAR}", value=str(len(winners)), inline=True)
+    embed.add_field(name="Other attempts", value=str(failed), inline=True)
     embed.add_field(
         name="Standings",
-        value="\n".join(lines) if lines else "No solves yet.",
+        value="\n".join(lines) if lines else "No solves yet — the grill is cold.",
         inline=False,
     )
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="shop", description="Buy cosmetic titles")
+@bot.tree.command(name="shop", description="Spend sponges at the Krusty Shop")
 async def shop_cmd(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
@@ -3230,13 +3250,16 @@ async def shop_cmd(interaction: discord.Interaction):
     stats = user_stats(gstats, interaction.user.id)
     stats["name"] = interaction.user.display_name
     save_data(bot.data)
-    owned = ", ".join(SHOP_TITLES[t]["label"] for t in stats["owned_titles"] if t in SHOP_TITLES) or "None"
-    equipped = SHOP_TITLES[stats["title"]]["label"] if stats.get("title") in SHOP_TITLES else "None"
+    owned = ", ".join(SHOP_TITLES[t]["label"] for t in stats["owned_titles"] if t in SHOP_TITLES) or "Empty pockets"
+    equipped = SHOP_TITLES[stats["title"]]["label"] if stats.get("title") in SHOP_TITLES else "Civilian"
     embed = paper_embed(f"{SPONGE} Krusty Shop")
-    embed.description = f"{BUBBLE} Spend sponges on goofy titles. Fancy!"
-    embed.add_field(name=f"Pocket {SPONGE}", value=format_sponges(stats["coins"]), inline=True)
-    embed.add_field(name="Title", value=equipped, inline=True)
-    embed.add_field(name="Owned", value=owned, inline=False)
+    embed.description = (
+        f"{BUBBLE} Welcome! Spend sponges on goofy titles.\n"
+        f"*No refunds. Squidward is watching.*"
+    )
+    embed.add_field(name=f"Your pocket {SPONGE}", value=f"**{format_sponges(stats['coins'])}**", inline=True)
+    embed.add_field(name="Equipped", value=f"**{equipped}**", inline=True)
+    embed.add_field(name="Closet", value=owned, inline=False)
     await interaction.response.send_message(embed=embed, view=ShopView(bot), ephemeral=True)
 
 
@@ -3296,7 +3319,7 @@ async def quit_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("No game to quit.", ephemeral=True)
 
 
-@bot.tree.command(name="leaderboard", description="Server leaderboards (sponges, times, daily, challenge)")
+@bot.tree.command(name="leaderboard", description="Bikini Bottom rankings — sponges, times, daily, challenge")
 @app_commands.describe(board="Which leaderboard to show")
 @app_commands.choices(
     board=[
@@ -3319,45 +3342,53 @@ async def leaderboard_cmd(
 
     if mode == "coins":
         ranked = sorted(players, key=lambda item: item[1].get("coins", 0), reverse=True)[:10]
-        title = f"{SPONGE} Sponges"
-        fmt = lambda s: f"{format_sponges(s.get('coins', 0))} · {s.get('wins', 0)}W/{s.get('losses', 0)}L"
+        title = f"{SPONGE} Richest pockets"
+        blurb = "Who's swimming in sponges?"
+        fmt = lambda s: f"**{format_sponges(s.get('coins', 0))}** · {s.get('wins', 0)}W/{s.get('losses', 0)}L"
         nonempty = lambda s: s.get("coins", 0) > 0 or s.get("wins", 0) > 0
     elif mode == "time":
         ranked = sorted(
             ((uid, s) for uid, s in players if s.get("best_time") is not None),
             key=lambda item: item[1]["best_time"],
         )[:10]
-        title = "Best time"
-        fmt = lambda s: format_time(s["best_time"])
+        title = f"{WAVE} Fastest clears"
+        blurb = "Boatmobile speedrun energy."
+        fmt = lambda s: f"**{format_time(s['best_time'])}**"
         nonempty = lambda s: True
     elif mode == "daily":
         ranked = sorted(players, key=lambda item: item[1].get("daily_wins", 0), reverse=True)[:10]
-        title = "Daily wins"
-        fmt = lambda s: f"{s.get('daily_wins', 0)} clears"
+        title = f"{PINEAPPLE} Daily legends"
+        blurb = "Pineapple puzzles conquered."
+        fmt = lambda s: f"**{s.get('daily_wins', 0)}** clears"
         nonempty = lambda s: s.get("daily_wins", 0) > 0
     else:
         ranked = sorted(players, key=lambda item: item[1].get("challenge_wins", 0), reverse=True)[:10]
-        title = "Challenge wins"
-        fmt = lambda s: f"{s.get('challenge_wins', 0)} wins"
+        title = f"{JELLY} Challenge champs"
+        blurb = "Jellyfish race winners."
+        fmt = lambda s: f"**{s.get('challenge_wins', 0)}** wins"
         nonempty = lambda s: s.get("challenge_wins", 0) > 0
 
     ranked = [(uid, s) for uid, s in ranked if nonempty(s)]
     if not ranked:
-        await interaction.response.send_message("No scores yet for this board.", ephemeral=True)
+        await interaction.response.send_message(
+            f"{BUBBLE} Nobody on this board yet — go earn some sponges with `/play`!",
+            ephemeral=True,
+        )
         return
 
-    medals = ["1.", "2.", "3."]
+    medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, (_, s) in enumerate(ranked[:10]):
-        prefix = medals[i] if i < 3 else f"{i + 1}."
+        prefix = medals[i] if i < 3 else f"`{i + 1}.`"
         lines.append(f"{prefix} **{display_name(s)}** — {fmt(s)}")
-    embed = paper_embed(f"Leaderboard · {title} · {interaction.guild.name}")
-    embed.add_field(name="Top players", value="\n".join(lines), inline=False)
+    embed = paper_embed(f"{title}")
+    embed.description = f"{blurb}\n*{interaction.guild.name}*"
+    embed.add_field(name="Top 10", value="\n".join(lines), inline=False)
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="stats", description="View Sudoku stats")
-@app_commands.describe(member="Optional member")
+@bot.tree.command(name="stats", description="Your Bikini Bottom Sudoku report card")
+@app_commands.describe(member="Peek at a neighbor's stats")
 async def stats_cmd(interaction: discord.Interaction, member: discord.Member | None = None):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
@@ -3367,18 +3398,34 @@ async def stats_cmd(interaction: discord.Interaction, member: discord.Member | N
     s = user_stats(gstats, target.id)
     s["name"] = target.display_name
     save_data(bot.data)
-    best = format_time(s["best_time"]) if s.get("best_time") is not None else "—"
-    title = SHOP_TITLES[s["title"]]["label"] if s.get("title") in SHOP_TITLES else "None"
-    embed = paper_embed(f"Stats · {display_name(s)}")
-    embed.add_field(name="Sponges", value=format_sponges(s["coins"]), inline=True)
-    embed.add_field(name="Title", value=title, inline=True)
-    embed.add_field(name="Wins", value=str(s["wins"]), inline=True)
-    embed.add_field(name="Losses", value=str(s["losses"]), inline=True)
-    embed.add_field(name="Daily", value=str(s.get("daily_wins", 0)), inline=True)
-    embed.add_field(name="Challenge", value=str(s.get("challenge_wins", 0)), inline=True)
-    embed.add_field(name="Best time", value=best, inline=True)
-    embed.add_field(name="Streak", value=str(s["streak"]), inline=True)
-    embed.add_field(name="Best streak", value=str(s["best_streak"]), inline=True)
+    best = format_time(s["best_time"]) if s.get("best_time") is not None else "— not yet!"
+    title = SHOP_TITLES[s["title"]]["label"] if s.get("title") in SHOP_TITLES else "Civilian"
+    streak = int(s.get("streak", 0))
+    best_streak = int(s.get("best_streak", 0))
+    wins = int(s.get("wins", 0))
+    losses = int(s.get("losses", 0))
+    games_n = int(s.get("games", 0)) or (wins + losses)
+    win_rate = f"{(100 * wins / games_n):.0f}%" if games_n else "—"
+
+    embed = paper_embed(f"{SPONGE} {display_name(s)}")
+    embed.description = (
+        f"{WAVE} Employee of the month? Maybe.\n"
+        f"**Title:** {title} · **Form:** {streak_flavor(streak)}"
+    )
+    try:
+        embed.set_thumbnail(url=target.display_avatar.url)
+    except Exception:
+        pass
+
+    embed.add_field(name=f"Pocket {SPONGE}", value=f"**{format_sponges(s['coins'])}**", inline=True)
+    embed.add_field(name=f"Streak {STAR}", value=f"**{streak}** (best {best_streak})", inline=True)
+    embed.add_field(name="Win rate", value=f"**{win_rate}**", inline=True)
+    embed.add_field(name="Wins", value=f"**{wins}**", inline=True)
+    embed.add_field(name="Losses", value=f"**{losses}**", inline=True)
+    embed.add_field(name="Best time", value=f"**{best}**", inline=True)
+    embed.add_field(name=f"Daily {PINEAPPLE}", value=f"**{s.get('daily_wins', 0)}** clears", inline=True)
+    embed.add_field(name=f"Challenge {JELLY}", value=f"**{s.get('challenge_wins', 0)}** wins", inline=True)
+    embed.add_field(name="Boards played", value=f"**{games_n}**", inline=True)
     await interaction.response.send_message(embed=embed)
 
 
