@@ -3832,7 +3832,10 @@ class SudokuBot(commands.Bot):
         print(f"Challenge match store: {kind}")
         await restore_leaderboard_from_mongo(self)
 
+        print("Slash tree: testboard uses autocomplete (no static pin choices).")
         # Global sync can take minutes; guild sync is instant for that server.
+        # Never let a bad slash payload take the whole process down on Render.
+        self._log_slash_payload_limits()
         if DISCORD_GUILD_ID:
             guild = discord.Object(id=DISCORD_GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -3840,14 +3843,28 @@ class SudokuBot(commands.Bot):
                 guild_synced = await self.tree.sync(guild=guild)
                 print(f"Synced {len(guild_synced)} slash command(s) to guild {DISCORD_GUILD_ID}.")
             except app_commands.CommandSyncFailure as exc:
-                print(f"Guild command sync failed: {exc}")
-                raise
+                print(f"Guild command sync failed (continuing): {exc}")
         try:
             synced = await self.tree.sync()
             print(f"Synced {len(synced)} global slash command(s).")
         except app_commands.CommandSyncFailure as exc:
-            print(f"Global command sync failed: {exc}")
-            raise
+            print(f"Global command sync failed (continuing): {exc}")
+
+    def _log_slash_payload_limits(self) -> None:
+        """Warn before Discord rejects option choice lists over 25."""
+        for cmd in self.tree.get_commands():
+            try:
+                payload = cmd.to_dict(self.tree)
+            except Exception as exc:  # noqa: BLE001
+                print(f"slash payload build failed for {getattr(cmd, 'name', cmd)}: {exc}")
+                continue
+            for opt in payload.get("options") or []:
+                n = len(opt.get("choices") or [])
+                if n > 25:
+                    print(
+                        f"WARNING: /{payload.get('name')} option '{opt.get('name')}' "
+                        f"has {n} choices (Discord max 25)"
+                    )
 
 
 bot = SudokuBot()
