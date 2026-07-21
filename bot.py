@@ -116,7 +116,6 @@ BOARD_HEADER_H = 42
 BOARD_CARD_PAD = 0          # full-bleed so the board aligns with the keyboard
 BOARD_CARD_RADIUS = 0
 BOARD_INNER_PAD = 12
-BOARD_REWARD_H = 64
 
 COLS = "ABCDEFGHI"
 FONTS_DIR = Path(__file__).with_name("fonts")
@@ -853,13 +852,12 @@ def render_board(
     conflicts: set[tuple[int, int]] | None = None,
     highlight_box: int | None = None,
     difficulty: str | None = None,
-    reward_sponges: int | None = None,
     theme_id: str | None = None,
 ) -> BytesIO:
     """Bikini Bottom board — bubbly digits, lagoon colors, full-bleed panel.
 
     The grid fills the image edge-to-edge so it lines up with Discord's button row
-    (same message width). When ``reward_sponges`` is set, a strip is drawn under the grid.
+    (same message width).
     """
     _ = solution
     pal = palette_for_theme(theme_id)
@@ -869,9 +867,8 @@ def render_board(
     pad = BOARD_CARD_PAD
     radius = BOARD_CARD_RADIUS
     inner = BOARD_INNER_PAD
-    reward_h = BOARD_REWARD_H if reward_sponges is not None else 0
 
-    img = Image.new("RGB", (canvas, canvas + reward_h), pal["card"])
+    img = Image.new("RGB", (canvas, canvas), pal["card"])
     draw = ImageDraw.Draw(img)
 
     # Full-width header bar (same width as the grid / Discord keyboard)
@@ -1017,9 +1014,6 @@ def render_board(
                         font=pencil_font,
                     )
 
-    if reward_sponges is not None:
-        _draw_reward_banner(draw, canvas=canvas, reward_h=reward_h, sponges=int(reward_sponges))
-
     out = BytesIO()
     img.save(out, format="PNG", compress_level=1)
     out.seek(0)
@@ -1035,76 +1029,10 @@ WIN_BANNER_LINES = (
 )
 
 
-def _draw_reward_banner(
-    draw: ImageDraw.ImageDraw,
-    *,
-    canvas: int,
-    reward_h: int,
-    sponges: int,
-) -> None:
-    """SpongeBob win strip under the solved board."""
-    y0 = canvas
-    y1 = canvas + reward_h
-    # Sunny sponge bar
-    draw.rectangle((0, y0, canvas, y1), fill="#FFE566")
-    draw.line((0, y0, canvas, y0), fill="#F59E0B", width=3)
-
-    pad_x = 14
-    # Teal "I'm ready" badge instead of plain check
-    badge = 28
-    bx = pad_x
-    by = y0 + (reward_h - badge) / 2
-    draw.rounded_rectangle(
-        (bx, by, bx + badge, by + badge),
-        radius=8,
-        fill="#0D9488",
-        outline="#134E4A",
-        width=2,
-    )
-    check_font = board_font(16, bold=True)
-    mark = "OK"
-    cb = draw.textbbox((0, 0), mark, font=check_font)
-    cw, ch = cb[2] - cb[0], cb[3] - cb[1]
-    draw.text(
-        (bx + (badge - cw) / 2, by + (badge - ch) / 2 - 1),
-        mark,
-        fill="#FFFFFF",
-        font=check_font,
-    )
-
-    font = board_font(17, bold=True)
-    label = random.choice(WIN_BANNER_LINES)
-    lb = draw.textbbox((0, 0), label, font=font)
-    lh = lb[3] - lb[1]
-    tx = bx + badge + 10
-    ty = y0 + (reward_h - lh) / 2 - 1
-    draw.text((tx, ty), label, fill="#134E4A", font=font)
-    tw = lb[2] - lb[0]
-
-    amount = f"+{int(sponges)}"
-    num_font = board_font(18, bold=True)
-    nb = draw.textbbox((0, 0), amount, font=num_font)
-    nw, nh = nb[2] - nb[0], nb[3] - nb[1]
-    ax = tx + tw + 10
-    ay = y0 + (reward_h - nh) / 2 - 1
-    draw.text((ax, ay), amount, fill="#B45309", font=num_font)
-
-    chip = 24
-    cx = ax + nw + 8
-    cy = y0 + (reward_h - chip) / 2
-    # Yellow sponge square
-    draw.rounded_rectangle(
-        (cx, cy, cx + chip, cy + chip),
-        radius=5,
-        fill="#F5D76E",
-        outline="#C4A035",
-        width=2,
-    )
-    for dx, dy in ((5, 6), (14, 8), (9, 15), (16, 16)):
-        draw.ellipse(
-            (cx + dx, cy + dy, cx + dx + 3.5, cy + dy + 3.5),
-            fill="#E8C84A",
-        )
+def win_reward_caption(coins: int) -> str:
+    """Readable win line under the board image (not painted into the PNG)."""
+    line = random.choice(WIN_BANNER_LINES)
+    return f"{BUBBLE} **{line} {format_sponges(max(int(coins), 0), signed=True)}!**"
 
 
 def board_to_file(image: BytesIO) -> discord.File:
@@ -2786,7 +2714,7 @@ class SudokuView(discord.ui.View):
             else:
                 coins = 0
 
-            # 2) Update THIS message only: solved board + congratulations strip
+            # 2) Same message: solved board image + reward as readable text underneath
             file = board_to_file(
                 render_board(
                     game["board"],
@@ -2794,13 +2722,13 @@ class SudokuView(discord.ui.View):
                     solution=game.get("solution"),
                     conflicts=set(),
                     difficulty=game.get("difficulty"),
-                    reward_sponges=max(int(coins), 0),
                     theme_id=game.get("board_theme"),
                 )
             )
+            caption = win_reward_caption(coins) if coins > 0 else f"{BUBBLE} **Board complete!**"
             try:
                 await interaction.edit_original_response(
-                    content=None,
+                    content=caption,
                     embed=None,
                     view=None,
                     attachments=[file],
