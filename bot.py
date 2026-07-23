@@ -2955,24 +2955,31 @@ class BoardRefreshView(discord.ui.View):
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Ack immediately — PNG render on Render often exceeds Discord's 3s window.
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except discord.HTTPException:
+            return
+
         game = games.get(self.game_key)
         if not game:
-            await interaction.response.edit_message(
-                content="This game has ended.",
-                embed=None,
-                view=None,
-                attachments=[],
-            )
+            try:
+                await interaction.edit_original_response(
+                    content="This game has ended.",
+                    embed=None,
+                    view=None,
+                    attachments=[],
+                )
+            except discord.errors.NotFound:
+                pass
             self.stop()
             return
         if interaction.user.id != game["owner_id"]:
-            await interaction.response.send_message("Not your board.", ephemeral=True)
-            return
-
-        # Defer first — PNG render on Render often exceeds Discord's 3s ack window.
-        try:
-            await interaction.response.defer()
-        except discord.HTTPException:
+            try:
+                await interaction.followup.send("Not your board.", ephemeral=True)
+            except (discord.errors.NotFound, discord.HTTPException):
+                pass
             return
 
         view = SudokuView(self.game_key, self.bot)
@@ -2984,6 +2991,9 @@ class BoardRefreshView(discord.ui.View):
                 attachments=[file],
                 view=view,
             )
+        except discord.errors.NotFound:
+            # 10015 Unknown Webhook — interaction token already expired; ignore quietly.
+            return
         except Exception:
             import traceback
 
@@ -2993,11 +3003,14 @@ class BoardRefreshView(discord.ui.View):
                     "Couldn't refresh the board — try `/play` or tap Refresh again.",
                     ephemeral=True,
                 )
-            except discord.HTTPException:
+            except (discord.errors.NotFound, discord.HTTPException):
                 pass
             return
 
-        view.message = await interaction.original_response()
+        try:
+            view.message = await interaction.original_response()
+        except discord.errors.NotFound:
+            return
         if view.message:
             game["message_id"] = view.message.id
         await persist_game(self.game_key, game)
@@ -3326,6 +3339,9 @@ class SudokuView(discord.ui.View):
                 view=self,
             )
             await persist_game(self.game_key, game)
+        except discord.errors.NotFound:
+            # 10015 Unknown Webhook — token expired; ignore quietly.
+            return
         except Exception:
             import traceback
 
